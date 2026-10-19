@@ -4,10 +4,18 @@
 #   ~/.claude/skills/opencode-dispatch   -> ~/.agents/skills/opencode-dispatch (only if missing)
 #   ~/.config/opencode-dispatch/scores.json -> config/scores.json
 # Anything already in the way is moved to ~/.config/opencode-dispatch/backups/<timestamp>/ first.
+# Requires opencode 2.x (checked below).
 # track.jsonl (your private dispatch history) stays in ~/.config/opencode-dispatch and is never linked.
 set -euo pipefail
 
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# The scripts only work with opencode 2.x; a missing opencode is fine (install it later), any other major is not.
+if command -v opencode >/dev/null 2>&1; then
+  node "$repo/skills/opencode-dispatch/scripts/oc-version.mjs" || exit 1
+else
+  echo "warning  opencode not found on PATH; install opencode 2.x before dispatching"
+fi
 config_dir="$HOME/.config/opencode-dispatch"
 backup_dir="$config_dir/backups/$(date +%Y%m%d-%H%M%S)"
 

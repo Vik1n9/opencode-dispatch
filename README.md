@@ -26,7 +26,7 @@ install.sh                  links the skill and score table into place
 ## Requirements
 
 - Node.js 18+ (scripts use only built-in modules)
-- opencode CLI (tested with 2.0.32), with the providers you want to use already authenticated
+- **opencode CLI 2.x only** (tested with 2.0.32), with the providers you want to use already authenticated. `oc-run.mjs`, `oc-models.mjs` and `install.sh` check `opencode --version` and refuse any other major version; check by hand with `node skills/opencode-dispatch/scripts/oc-version.mjs`
 - Claude Code (or another agent that loads skills from `~/.agents/skills` / `~/.claude/skills`)
 - Optional: TokenBar, for `oc-quota.mjs`
 
@@ -38,7 +38,7 @@ cd opencode-dispatch
 ./install.sh
 ```
 
-`install.sh` symlinks `skills/opencode-dispatch` into `~/.agents/skills/` (and `~/.claude/skills/` if missing) and `config/scores.json` into `~/.config/opencode-dispatch/`. Anything already in the way is moved to `~/.config/opencode-dispatch/backups/<timestamp>/`. Because the score table is a symlink, internal scores written by `oc-track.mjs` show up as changes in this repository.
+`install.sh` first checks the opencode version (it stops on anything other than 2.x; a missing opencode only prints a warning), then symlinks `skills/opencode-dispatch` into `~/.agents/skills/` (and `~/.claude/skills/` if missing) and `config/scores.json` into `~/.config/opencode-dispatch/`. Anything already in the way is moved to `~/.config/opencode-dispatch/backups/<timestamp>/`. Because the score table is a symlink, internal scores written by `oc-track.mjs` show up as changes in this repository.
 
 ## Quick start
 

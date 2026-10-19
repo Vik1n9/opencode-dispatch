@@ -7,6 +7,10 @@ description: Dispatch work to other models (DeepSeek, Qwen, GLM, Kimi, etc.) thr
 
 Claude Code is the dispatcher; opencode is the worker. Every call goes through `scripts/oc-run.mjs` — never run `opencode run` directly in Bash.
 
+## Version requirement
+
+**Only opencode 2.x is supported** (tested with 2.0.32). The scripts rely on 2.x behavior — `run --format json` event shapes, `-s` / `--fork`, `$PWD` project selection, `opencode models` output — so `oc-run.mjs` and `oc-models.mjs` check `opencode --version` and refuse to run on any other major version. Check by hand with `node ~/.agents/skills/opencode-dispatch/scripts/oc-version.mjs`. If it fails, tell the user; do not work around it by calling `opencode run` directly.
+
 ## Why the wrapper script is mandatory
 
 Pitfalls found in practice (opencode 2.0.32), all handled by the script:

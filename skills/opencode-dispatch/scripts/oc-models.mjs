@@ -23,6 +23,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { checkOpencode } from './oc-version.mjs';
 
 const argv = process.argv.slice(2);
 const has = (f) => argv.includes(f);
@@ -34,6 +35,9 @@ const ZEN_LIVE = 'https://opencode.ai/zen/v1/models';
 const GO_DOCS = 'https://opencode.ai/docs/go/';
 const GO_LIVE = 'https://opencode.ai/zen/go/v1/models';
 const HOSTED = new Set(['opencode', 'opencode-go']); // OpenCode's own (Zen / Go): official information wins
+
+const version = checkOpencode();
+if (!version.ok) { console.error(version.error); process.exit(2); }
 
 const dir = mkdtempSync(join(tmpdir(), 'oc-models-'));
 const oc = (args) => spawnSync('opencode', args, { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, PWD: dir } }).stdout || '';
