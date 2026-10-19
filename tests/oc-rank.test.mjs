@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
-import { makeSandbox, runScript, writeShim, writeJson, SHIM_OK } from './helpers.mjs';
+import { makeSandbox, runScript, writeShim, writeJson, configDir, SHIM_OK } from './helpers.mjs';
 
 const CAT = 'repo-coding';
 const BENCH = 'SWE-bench Verified';
@@ -50,6 +50,17 @@ const json = (r) => {
   assert.equal(r.status, 0, r.stderr);
   return r.json;
 };
+
+const limitsPath = (sb) => join(configDir(sb), 'limits.json');
+const pause = (sb, ...ids) => writeJson(limitsPath(sb), {
+  models: Object.fromEntries(ids.map((id) => [id, {
+    hitAt: '2026-10-19T00:00:00.000Z',
+    message: 'Rate limit exceeded.',
+    probes: 0,
+    lastProbe: '2026-10-19T00:00:00.000Z',
+    nextProbe: '2099-01-01T00:00:00.000Z',
+  }])),
+});
 
 test('oc-rank: capability first — a clearly weaker token-plan model is never picked', (t) => {
   const { rank } = setup(t, {
@@ -524,6 +535,105 @@ test('oc-rank: SPEED_EQUAL task speed — a 1.25x difference is equally fast, so
     ]),
   });
   assert.equal(json(rank(['--json'])).results[0].pick, 'opencode/free');
+});
+
+test('oc-rank: a paused model is dropped from ranking and shadow and listed in text and JSON', (t) => {
+  const { sb, rank } = setup(t, {
+    scores: table([
+      { key: 'best', aliases: ['opencode/best-free'], scores: { [BENCH]: 90 } },
+      { key: 'ok', aliases: ['opencode/ok-free'], scores: { [BENCH]: 70 } },
+      { key: 'stealth', aliases: ['opencode/stealth-free'], stealth: true, scores: {} },
+    ]),
+    inventory: cache([
+      { id: 'opencode/best-free' },
+      { id: 'opencode/ok-free' },
+      { id: 'opencode/stealth-free' },
+    ]),
+  });
+  pause(sb, 'opencode/best-free', 'opencode/stealth-free');
+
+  const r = json(rank(['--json']));
+  assert.equal(r.results[0].pick, 'opencode/ok-free');
+  assert.deepEqual(r.results[0].ranking.map((x) => x.id), ['opencode/ok-free']);
+  assert.deepEqual(r.shadow, []);
+  assert.deepEqual(r.paused.map((p) => p.id).sort(), ['opencode/best-free', 'opencode/stealth-free']);
+  assert.deepEqual(r.paused.map((p) => p.due), [false, false]);
+
+  const text = rank();
+  assert.equal(text.status, 0);
+  assert.match(text.stdout, /paused \(rate limited\): opencode\/best-free \(next probe \d\d:\d\d\), opencode\/stealth-free \(next probe \d\d:\d\d\)/);
+  assert.doesNotMatch(text.stdout, /shadow-run candidates/);
+});
+
+test('oc-rank: a paused Zen entry keeps its Go counterpart out of shadow runs', (t) => {
+  const { sb, rank } = setup(t, {
+    scores: table([
+      { key: 'stealth', aliases: ['opencode/zen-free', 'opencode-go/go-stealth'], stealth: true, scores: {} },
+      { key: 'other', aliases: ['opencode/other-free'], stealth: true, scores: {} },
+    ]),
+    inventory: cache([
+      { id: 'opencode/zen-free' },
+      { id: 'opencode-go/go-stealth' },
+      { id: 'opencode/other-free' },
+    ]),
+  });
+  pause(sb, 'opencode/zen-free');
+
+  const r = json(rank(['--json']));
+  // The Go entry is usable, but the same stealth model is rate limited on Zen: wait for the reset.
+  assert.deepEqual(r.shadow, [{ id: 'opencode/other-free', context: 400000, known: true }]);
+  assert.deepEqual(r.notInTable, []);
+  assert.deepEqual(r.paused.map((p) => p.id), ['opencode/zen-free']);
+});
+
+test('oc-rank: --no-free drops every Zen free entry and pauses shadow runs', (t) => {
+  const { sb, rank } = setup(t, {
+    scores: table([
+      { key: 'free', aliases: ['opencode/free'], scores: { [BENCH]: 80 } },
+      { key: 'go', aliases: ['opencode-go/go'], scores: { [BENCH]: 70 } },
+      { key: 'paid', aliases: ['deepseek/paid'], scores: { [BENCH]: 60 } },
+      { key: 'stealth', aliases: ['opencode/stealth-free'], stealth: true, scores: {} },
+    ]),
+    inventory: cache([
+      { id: 'opencode/free' },
+      { id: 'opencode-go/go' },
+      { id: 'deepseek/paid' },
+      { id: 'opencode/stealth-free' },
+    ]),
+  });
+  pause(sb, 'opencode/free');
+
+  const r = json(rank(['--json', '--no-free']));
+  assert.equal(r.noFree, true);
+  assert.equal(r.results[0].pick, 'opencode-go/go');
+  assert.ok(!r.results[0].ranking.some((x) => x.id.startsWith('opencode/')));
+  assert.deepEqual(r.shadow, []);
+  assert.deepEqual(r.paused.map((p) => p.id), ['opencode/free']);
+
+  const text = rank(['--no-free']);
+  assert.equal(text.status, 0);
+  assert.match(text.stdout, /shadow runs paused \(--no-free: free usage limit\)/);
+  assert.match(text.stdout, /paused \(rate limited\): opencode\/free/);
+});
+
+test('oc-rank: a missing limits.json and an empty one give byte-identical output', (t) => {
+  const { sb, rank } = setup(t, {
+    scores: table([
+      { key: 'a', aliases: ['opencode/a-free'], scores: { [BENCH]: 80 } },
+      { key: 'b', aliases: ['opencode/b-free'], scores: { [BENCH]: 79 } },
+    ]),
+    inventory: cache([{ id: 'opencode/a-free' }, { id: 'opencode/b-free' }]),
+  });
+  const beforeJson = rank(['--json']);
+  const beforeText = rank();
+  assert.equal(beforeJson.status, 0, beforeJson.stderr);
+  assert.equal(beforeText.status, 0, beforeText.stderr);
+
+  writeJson(limitsPath(sb), { models: {} });
+  const afterJson = rank(['--json']);
+  const afterText = rank();
+  assert.equal(afterJson.stdout, beforeJson.stdout);
+  assert.equal(afterText.stdout, beforeText.stdout);
 });
 
 test('oc-rank: SPEED_EQUAL task speed — a 1.4x difference wins on speed regardless of plan', (t) => {

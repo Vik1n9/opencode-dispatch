@@ -4,6 +4,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   makeSandbox, runScript, writeShim, SHIM_OK, writeEvents, spawnScript, waitFor, isAlive,
+  configDir, readJson,
 } from './helpers.mjs';
 
 const base = () => {
@@ -161,7 +162,7 @@ test('oc-run: --prompt-file, --session, --fork and --title reach the shim', (t) 
     '-s', 'ses_old', '--fork', '--title', 'T', 'long task from a file']);
 });
 
-test('oc-run: a non-zero opencode exit is a failed run with exit 1', { todo: 'bug: a non-zero opencode exit is passed through instead of the documented exit 1' }, (t) => {
+test('oc-run: a non-zero opencode exit is a failed run with exit 1', (t) => {
   const sb = base();
   const events = writeEvents(sb, [{ type: 'text', sessionID: 'ses_1', part: { text: 'partial' } }]);
   const r = runScript(sb, 'oc-run.mjs', ['--model', 'opencode/x', 'hi'],
@@ -187,4 +188,62 @@ test('oc-run: a failed environment check exits 2', (t) => {
   assert.equal(r.status, 2);
   assert.equal(r.json.ok, false);
   assert.match(r.json.error, /cloud session/);
+});
+
+const QUOTA_EVENT = {
+  type: 'error',
+  sessionID: 'ses_q',
+  error: {
+    type: 'provider.quota',
+    message: 'Rate limit exceeded. Please try again later.',
+    status: 429,
+    response: { body: '{"type":"error","error":{"type":"FreeUsageLimitError"}}' },
+  },
+};
+const limitsPath = (sb) => join(configDir(sb), 'limits.json');
+
+test('oc-run: a quota event sets rateLimited and records the hit at hit + 1 h', (t) => {
+  const sb = base();
+  const events = writeEvents(sb, [QUOTA_EVENT]);
+  const started = Date.now();
+  const r = runScript(sb, 'oc-run.mjs', ['--model', 'opencode/x', 'hi'], { env: { ...SHIM_OK, OC_SHIM_EVENTS: events } });
+  assert.equal(r.status, 1);
+  assert.equal(r.json.ok, false);
+  assert.equal(r.json.rateLimited, true);
+  assert.deepEqual(r.json.limit, { type: 'provider.quota', message: 'Rate limit exceeded. Please try again later.' });
+
+  const entry = readJson(limitsPath(sb)).models['opencode/x'];
+  assert.equal(entry.probes, 0);
+  assert.equal(entry.message, 'Rate limit exceeded. Please try again later.');
+  const hit = new Date(entry.hitAt).getTime();
+  const next = new Date(entry.nextProbe).getTime();
+  assert.equal(next - hit, 60 * 60 * 1000);
+  assert.ok(hit >= started - 5000 && hit <= Date.now() + 5000, `hitAt ${entry.hitAt}`);
+});
+
+test('oc-run: a normal run is not rate limited', (t) => {
+  const sb = base();
+  const events = writeEvents(sb, EVENTS);
+  const r = runScript(sb, 'oc-run.mjs', ['--model', 'opencode/x', 'hi'], { env: { ...SHIM_OK, OC_SHIM_EVENTS: events } });
+  assert.equal(r.status, 0);
+  assert.equal(r.json.ok, true);
+  assert.equal(r.json.rateLimited, false);
+  assert.equal(r.json.limit, null);
+  assert.equal(existsSync(limitsPath(sb)), false);
+});
+
+test('oc-run: a later successful run clears the pause', (t) => {
+  const sb = base();
+  const limited = writeEvents(sb, [QUOTA_EVENT]);
+  const failed = runScript(sb, 'oc-run.mjs', ['--model', 'opencode/x', 'hi'],
+    { env: { ...SHIM_OK, OC_SHIM_EVENTS: limited } });
+  assert.equal(failed.status, 1);
+  assert.ok(readJson(limitsPath(sb)).models['opencode/x']);
+
+  const ok = writeEvents(sb, EVENTS);
+  const r = runScript(sb, 'oc-run.mjs', ['--model', 'opencode/x', 'hi'],
+    { env: { ...SHIM_OK, OC_SHIM_EVENTS: ok } });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.json.rateLimited, false);
+  assert.equal('opencode/x' in readJson(limitsPath(sb)).models, false);
 });

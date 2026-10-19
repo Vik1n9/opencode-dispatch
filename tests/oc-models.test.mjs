@@ -2,7 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { makeSandbox, runScript, writeShim, SHIM_OK } from './helpers.mjs';
+import {
+  makeSandbox, runScript, writeShim, SHIM_OK, writeEvents, configDir, readJson,
+} from './helpers.mjs';
 
 const network = process.env.OC_TEST_NETWORK === '1';
 
@@ -98,4 +100,43 @@ test('oc-models: a full run writes the cache and lists official models', { skip:
   assert.ok(Array.isArray(data.models));
   assert.ok(data.models.some((m) => m.source === 'official'));
   assert.equal(data.probed, false);
+});
+
+test('oc-models: --probe --only records a rate-limit hit and a success clears it', { skip: !network && 'needs network: set OC_TEST_NETWORK=1' }, (t) => {
+  const sb = box(t);
+  const cache = join(sb.dir, 'inventory.json');
+  // Discover a model from the official list, then probe only that one against the fake opencode.
+  const full = models(sb, ['--no-go', '--cache', cache], { ...SHIM_OK });
+  assert.equal(full.status, 0, full.stderr);
+  const target = readJson(cache).models.find((m) => m.id?.startsWith('opencode/'));
+  assert.ok(target, 'the official list has at least one Zen free model');
+
+  const quota = writeEvents(sb, [{
+    type: 'error',
+    sessionID: 'ses_q',
+    error: {
+      type: 'provider.quota',
+      message: 'Rate limit exceeded. Please try again later.',
+      status: 429,
+      response: { body: '{"type":"error","error":{"type":"FreeUsageLimitError"}}' },
+    },
+  }]);
+  const hit = models(sb, ['--probe', '--cache', cache, '--only', target.id],
+    { ...SHIM_OK, OC_SHIM_EVENTS: quota });
+  assert.equal(hit.status, 0, hit.stderr);
+  const limited = readJson(cache).models.find((m) => m.id === target.id);
+  assert.equal(limited.probe.ok, false);
+  assert.equal(limited.probe.error, 'rate limited (paused)');
+  const paused = readJson(join(configDir(sb), 'limits.json')).models;
+  assert.equal(paused[target.id].probes, 0);
+  assert.equal(paused[target.id].nextProbe,
+    new Date(new Date(paused[target.id].hitAt).getTime() + 60 * 60 * 1000).toISOString());
+
+  const ok = writeEvents(sb, [{ type: 'text', sessionID: 'ses_p', part: { text: '42' } }]);
+  const success = models(sb, ['--probe', '--cache', cache, '--only', target.id],
+    { ...SHIM_OK, OC_SHIM_EVENTS: ok });
+  assert.equal(success.status, 0, success.stderr);
+  const cleared = readJson(cache).models.find((m) => m.id === target.id);
+  assert.equal(cleared.probe.ok, true);
+  assert.equal(target.id in readJson(join(configDir(sb), 'limits.json')).models, false);
 });
