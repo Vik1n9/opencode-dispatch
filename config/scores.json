@@ -1,0 +1,528 @@
+{
+  "_about": "Score table for opencode-dispatch. Scores belong to a model version, never expire, and are only added to. One entry per model: aliases = the opencode IDs that point to the same model version; scores keys = benchmark names with version (e.g. Terminal-Bench 2.1 and 2.0 are not comparable); source = vendor (vendor-reported or relayed) or independent (third-party measurement) — when a benchmark has an independent result, it wins. Category mapping is in categories. internal.<category> of each model is the internal score (from this setup's own dispatch history, computed by oc-track.mjs, weighted 2x external benchmarks); the raw track record is track.jsonl in the same folder and is not read routinely.",
+  "categories": {
+    "repo-coding": {
+      "label": "Fix bugs / add features in an existing codebase",
+      "benchmarks": [
+        "DeepSWE v1.1",
+        "SWE-bench Pro",
+        "SWE-bench Verified"
+      ]
+    },
+    "terminal": {
+      "label": "Terminal work, running tests, environment setup, scripts",
+      "benchmarks": [
+        "Terminal-Bench 2.1",
+        "Terminal-Bench 2.0"
+      ]
+    },
+    "greenfield": {
+      "label": "New projects from scratch, large refactors",
+      "benchmarks": [
+        "NL2Repo-Bench",
+        "ProgramBench"
+      ]
+    },
+    "tools": {
+      "label": "Multi-step tool calling, chaining APIs",
+      "benchmarks": [
+        "Toolathlon-Verified",
+        "PinchBench"
+      ]
+    },
+    "gui-vision": {
+      "label": "Reading screenshots, operating GUIs",
+      "benchmarks": [
+        "OSWorld-Verified",
+        "MMMU"
+      ]
+    },
+    "reasoning": {
+      "label": "Reasoning, math, planning",
+      "benchmarks": [
+        "GPQA Diamond",
+        "HLE"
+      ]
+    },
+    "security": {
+      "label": "Security review, finding vulnerabilities",
+      "benchmarks": [
+        "CyberGym"
+      ]
+    },
+    "instruction": {
+      "label": "Format-following rewrites, translation, data cleanup (mechanical work)",
+      "benchmarks": [
+        "IFBench",
+        "IFEval"
+      ]
+    },
+    "long-context": {
+      "label": "Reading very long files or large context",
+      "benchmarks": [
+        "RULER",
+        "MRCR"
+      ]
+    }
+  },
+  "models": {
+    "deepseek-v4.1-flash": {
+      "name": "DeepSeek V4.1 Flash",
+      "aliases": [
+        "deepseek/deepseek-flash",
+        "opencode/deepseek-v4.1-flash-free",
+        "opencode-go/deepseek-v4.1-flash"
+      ],
+      "scores": {
+        "DeepSWE v1.1": {
+          "value": 74.2,
+          "source": "vendor",
+          "ref": "https://thenextweb.com/news/deepseek-v4-1-flash-launch-v4-pro-retired-price-cut"
+        },
+        "Terminal-Bench 2.1": {
+          "value": 90.6,
+          "source": "vendor",
+          "ref": "https://thenextweb.com/news/deepseek-v4-1-flash-launch-v4-pro-retired-price-cut"
+        },
+        "CyberGym": {
+          "value": 88.1,
+          "source": "vendor",
+          "ref": "https://thenextweb.com/news/deepseek-v4-1-flash-launch-v4-pro-retired-price-cut"
+        },
+        "HLE": {
+          "value": 36.8,
+          "source": "vendor",
+          "ref": "https://thenextweb.com/news/deepseek-v4-1-flash-launch-v4-pro-retired-price-cut"
+        },
+        "ProgramBench": {
+          "value": 20.3,
+          "source": "vendor",
+          "ref": "https://thenextweb.com/news/deepseek-v4-1-flash-launch-v4-pro-retired-price-cut"
+        },
+        "GPQA Diamond": {
+          "value": 90.9,
+          "source": "vendor",
+          "ref": "https://arxiv.org/pdf/2609.19969"
+        }
+      },
+      "notes": "Independent: Vals Index 57.86 (top open-weight model), AutomationBench-AA 68.9% (Artificial Analysis).",
+      "abTest": [
+        {
+          "date": "2026-10-19",
+          "task": "Streaming-rule fix in a check.mjs script (same spec for both)",
+          "paid": {
+            "id": "deepseek/deepseek-flash",
+            "seconds": 38.7,
+            "steps": 11,
+            "inputTokens": 13319,
+            "costUSD": 0.00635,
+            "review": "passed"
+          },
+          "free": {
+            "id": "opencode/deepseek-v4.1-flash-free",
+            "seconds": 106.9,
+            "steps": 20,
+            "inputTokens": 69964,
+            "costUSD": 0,
+            "review": "passed, more thorough verification"
+          },
+          "conclusion": "No significant quality difference; the paid entry finished the real task about 2.8x faster with less exploration; probe latency (2.3s vs 2.9s) does not reflect the gap. Single sample."
+        }
+      ],
+      "internal": {
+        "repo-coding": {
+          "score": 100,
+          "n": 6,
+          "updated": "2026-10-19",
+          "speed": {
+            "opencode/deepseek-v4.1-flash-free": {
+              "ratio": 2.76,
+              "n": 1,
+              "medianSeconds": 374
+            },
+            "deepseek/deepseek-flash": {
+              "ratio": 1,
+              "n": 1,
+              "medianSeconds": 39
+            }
+          }
+        }
+      }
+    },
+    "deepseek-v4-pro": {
+      "name": "DeepSeek V4 Pro",
+      "aliases": [
+        "deepseek/deepseek-v4-pro",
+        "opencode-go/deepseek-v4-pro"
+      ],
+      "scores": {
+        "SWE-bench Verified": {
+          "value": 74,
+          "source": "independent",
+          "ref": "https://www.flowhunt.io/fr/ai-leaderboard/deepseek-v4-pro/",
+          "vendorValue": 80.6
+        },
+        "SWE-bench Pro": {
+          "value": 55.4,
+          "source": "vendor",
+          "ref": "https://www.flowhunt.io/fr/ai-leaderboard/deepseek-v4-pro/"
+        }
+      },
+      "notes": "DeepSeek announced V4 Pro's retirement when launching V4.1 Flash (TNW); it may stop being callable."
+    },
+    "qwen3.8-max": {
+      "name": "Qwen3.8 Max",
+      "aliases": [
+        "bailian-token-plan-personal/qwen3.8-max",
+        "opencode-go/qwen3.8-max"
+      ],
+      "scores": {
+        "SWE-bench Pro": {
+          "value": 67.7,
+          "source": "vendor",
+          "ref": "https://huggingface.co/Qwen/Qwen3.8-2.4T-A95B"
+        },
+        "DeepSWE v1.1": {
+          "value": 56.6,
+          "source": "vendor",
+          "ref": "https://www.labellerr.com/blog/qwen-3-8-max-vs-kimi-k3/"
+        },
+        "Terminal-Bench 2.1": {
+          "value": 86.6,
+          "source": "vendor",
+          "ref": "https://www.labellerr.com/blog/qwen-3-8-max-vs-kimi-k3/"
+        },
+        "NL2Repo-Bench": {
+          "value": 55.9,
+          "source": "vendor",
+          "ref": "https://www.labellerr.com/blog/qwen-3-8-max-vs-kimi-k3/"
+        },
+        "GPQA Diamond": {
+          "value": 92.6,
+          "source": "vendor",
+          "ref": "https://huggingface.co/Qwen/Qwen3.8-2.4T-A95B"
+        },
+        "HLE": {
+          "value": 43.6,
+          "source": "vendor",
+          "ref": "https://huggingface.co/Qwen/Qwen3.8-2.4T-A95B"
+        },
+        "IFBench": {
+          "value": 82.8,
+          "source": "vendor",
+          "ref": "https://benchlm.ai/md/models/qwen3-8-max.md"
+        },
+        "Toolathlon-Verified": {
+          "value": 72.5,
+          "source": "vendor",
+          "ref": "https://benchlm.ai/md/models/qwen3-8-max.md"
+        },
+        "OSWorld-Verified": {
+          "value": 86.1,
+          "source": "vendor",
+          "ref": "https://www.labellerr.com/blog/qwen-3-8-max-vs-kimi-k3/"
+        }
+      },
+      "internal": {
+        "repo-coding": {
+          "score": 83.8,
+          "n": 4,
+          "updated": "2026-10-19",
+          "speed": {
+            "bailian-token-plan-personal/qwen3.8-max": {
+              "ratio": null,
+              "n": 0,
+              "medianSeconds": 1777
+            }
+          }
+        },
+        "instruction": {
+          "score": 95,
+          "n": 1,
+          "updated": "2026-10-19",
+          "speed": {
+            "bailian-token-plan-personal/qwen3.8-max": {
+              "ratio": null,
+              "n": 0,
+              "medianSeconds": 788
+            }
+          }
+        }
+      }
+    },
+    "qwen3.7-max": {
+      "name": "Qwen3.7 Max",
+      "aliases": [
+        "bailian-token-plan-personal/qwen3.7-max",
+        "opencode-go/qwen3.7-max"
+      ],
+      "scores": {
+        "SWE-bench Pro": {
+          "value": 60.6,
+          "source": "vendor",
+          "ref": "https://www.mindstudio.ai/blog/qwen-3-8-max-benchmarks-explained"
+        },
+        "DeepSWE v1.1": {
+          "value": 21.6,
+          "source": "vendor",
+          "ref": "https://www.labellerr.com/blog/qwen-3-8-max-vs-kimi-k3/"
+        }
+      }
+    },
+    "qwen3.7-plus": {
+      "name": "Qwen3.7 Plus",
+      "aliases": [
+        "bailian-token-plan-personal/qwen3.7-plus",
+        "opencode-go/qwen3.7-plus"
+      ],
+      "scores": {
+        "GPQA Diamond": {
+          "value": 90.3,
+          "source": "vendor",
+          "ref": "https://benchlm.ai/md/compare/deepseek-v4-1-flash-vs-qwen3-7-plus.md"
+        },
+        "Terminal-Bench 2.0": {
+          "value": 70.3,
+          "source": "vendor",
+          "ref": "https://benchlm.ai/md/compare/deepseek-v4-1-flash-vs-qwen3-7-plus.md"
+        },
+        "SWE-bench Verified": {
+          "value": 77.7,
+          "source": "vendor",
+          "ref": "https://benchlm.ai/md/compare/deepseek-v4-1-flash-vs-qwen3-7-plus.md"
+        },
+        "SWE-bench Pro": {
+          "value": 57.6,
+          "source": "vendor",
+          "ref": "https://benchlm.ai/md/compare/deepseek-v4-1-flash-vs-qwen3-7-plus.md"
+        }
+      }
+    },
+    "qwen3.6-flash": {
+      "name": "Qwen3.6 Flash",
+      "aliases": [
+        "bailian-token-plan-personal/qwen3.6-flash"
+      ],
+      "scores": {},
+      "notes": "No reliable benchmarks found (2026-10-19)."
+    },
+    "glm-5.3-flash": {
+      "name": "GLM-5.3-Flash",
+      "aliases": [
+        "opencode/glm-5.3-flash-free",
+        "opencode-go/glm-5.3-flash"
+      ],
+      "scores": {
+        "Terminal-Bench 2.1": {
+          "value": 84.3,
+          "source": "vendor",
+          "ref": "https://www.cometapi.com/de/models/zhipuai/glm-5-3-flash/"
+        },
+        "DeepSWE v1.1": {
+          "value": 63.4,
+          "source": "vendor",
+          "ref": "https://www.cometapi.com/de/models/zhipuai/glm-5-3-flash/"
+        },
+        "NL2Repo-Bench": {
+          "value": 56.3,
+          "source": "vendor",
+          "ref": "https://www.cometapi.com/de/models/zhipuai/glm-5-3-flash/"
+        },
+        "Toolathlon-Verified": {
+          "value": 78.4,
+          "source": "vendor",
+          "ref": "https://www.cometapi.com/de/models/zhipuai/glm-5-3-flash/"
+        },
+        "GPQA Diamond": {
+          "value": 86.4,
+          "source": "independent",
+          "ref": "https://www.vals.ai/comparisons/xiaomi_mimo-v2.5-vs-zai_glm-5.3-flash"
+        }
+      }
+    },
+    "mimo-v2.6-flash": {
+      "name": "MiMo-V2.6-Flash",
+      "aliases": [
+        "opencode/mimo-v2.6-flash-free",
+        "opencode-go/mimo-v2.6-flash"
+      ],
+      "scores": {
+        "Terminal-Bench 2.1": {
+          "value": 87.6,
+          "source": "vendor",
+          "ref": "https://www.cometapi.com/en/models/xiaomimimo/mimo-v2-6-flash"
+        },
+        "OSWorld-Verified": {
+          "value": 80.8,
+          "source": "vendor",
+          "ref": "https://www.cometapi.com/en/models/xiaomimimo/mimo-v2-6-flash"
+        },
+        "Toolathlon-Verified": {
+          "value": 73.6,
+          "source": "vendor",
+          "ref": "https://www.cometapi.com/en/models/xiaomimimo/mimo-v2-6-flash"
+        },
+        "DeepSWE v1.1": {
+          "value": 67.9,
+          "source": "vendor",
+          "ref": "https://www.cometapi.com/en/models/xiaomimimo/mimo-v2-6-flash"
+        },
+        "ProgramBench": {
+          "value": 26,
+          "source": "vendor",
+          "ref": "https://www.cometapi.com/en/models/xiaomimimo/mimo-v2-6-flash"
+        }
+      },
+      "internal": {
+        "repo-coding": {
+          "score": 95,
+          "n": 1,
+          "updated": "2026-10-19",
+          "speed": {
+            "opencode/mimo-v2.6-flash-free": {
+              "ratio": null,
+              "n": 0,
+              "medianSeconds": 1566
+            }
+          }
+        }
+      }
+    },
+    "nemotron-3-ultra": {
+      "name": "Nemotron 3 Ultra",
+      "aliases": [
+        "opencode/nemotron-3-ultra-free"
+      ],
+      "scores": {
+        "Terminal-Bench 2.0": {
+          "value": 19.1,
+          "source": "independent",
+          "ref": "https://blog.kilo.ai/nvidia-nemotron-3-ultra",
+          "vendorValue": 54
+        },
+        "PinchBench": {
+          "value": 91,
+          "source": "vendor",
+          "ref": "https://www.deeplearning.ai/the-batch/nvidias-nemotron-goes-big"
+        }
+      }
+    },
+    "nemotron-3.5-lightning": {
+      "name": "Nemotron 3.5 Lightning",
+      "aliases": [
+        "opencode/nemotron-3.5-lightning-free"
+      ],
+      "scores": {
+        "SWE-bench Verified": {
+          "value": 52.8,
+          "source": "vendor",
+          "ref": "https://www.tomshw.it/hardware/nvidia-nemotron-3-5-lightning-669-token-al-secondo"
+        },
+        "GPQA Diamond": {
+          "value": 75.6,
+          "source": "vendor",
+          "ref": "https://www.tomshw.it/hardware/nvidia-nemotron-3-5-lightning-669-token-al-secondo"
+        },
+        "IFBench": {
+          "value": 72.9,
+          "source": "vendor",
+          "ref": "https://www.tomshw.it/hardware/nvidia-nemotron-3-5-lightning-669-token-al-secondo"
+        }
+      }
+    },
+    "nemotron-3.5-super-vl": {
+      "name": "Nemotron 3.5 Super VL",
+      "aliases": [
+        "opencode/nemotron-3.5-super-vl-free"
+      ],
+      "scores": {},
+      "notes": "120B vision-language model; no scores found."
+    },
+    "longcat-2.5-preview": {
+      "name": "LongCat 2.5 Preview",
+      "aliases": [
+        "opencode/longcat-2.5-preview-free",
+        "opencode-go/longcat-2.5-preview-free"
+      ],
+      "scores": {},
+      "notes": "Closed-source preview; no independent benchmarks found."
+    },
+    "big-pickle": {
+      "name": "Big Pickle (stealth)",
+      "aliases": [
+        "opencode/big-pickle"
+      ],
+      "scores": {},
+      "notes": "Anonymous model; officially described as optimized for coding agents.",
+      "internal": {
+        "repo-coding": {
+          "score": 85,
+          "n": 1,
+          "updated": "2026-10-19",
+          "speed": {
+            "opencode/big-pickle": {
+              "ratio": 23.79,
+              "n": 1,
+              "medianSeconds": 5445
+            }
+          }
+        }
+      },
+      "stealth": true
+    },
+    "beam": {
+      "name": "Beam (stealth)",
+      "aliases": [
+        "opencode/beam-free",
+        "opencode-go/beam-free"
+      ],
+      "scores": {},
+      "internal": {
+        "repo-coding": {
+          "score": 75,
+          "n": 1,
+          "updated": "2026-10-19",
+          "speed": {
+            "opencode/beam-free": {
+              "ratio": 1,
+              "n": 1,
+              "medianSeconds": 229
+            }
+          }
+        }
+      },
+      "stealth": true
+    },
+    "space-bunny": {
+      "name": "Space Bunny (stealth)",
+      "aliases": [
+        "opencode/space-bunny-free",
+        "opencode-go/space-bunny"
+      ],
+      "scores": {},
+      "internal": {
+        "repo-coding": {
+          "score": 90,
+          "n": 1,
+          "updated": "2026-10-19",
+          "speed": {
+            "opencode/space-bunny-free": {
+              "ratio": 3.65,
+              "n": 1,
+              "medianSeconds": 837
+            }
+          }
+        }
+      },
+      "stealth": true
+    },
+    "muse-spark-1.3": {
+      "name": "Muse Spark 1.3",
+      "aliases": [
+        "opencode-go/muse-spark-1.3-contributor"
+      ],
+      "scores": {},
+      "notes": "Go Contributor version; data is used for training."
+    }
+  }
+}

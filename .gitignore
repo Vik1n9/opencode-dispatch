@@ -1,0 +1,7 @@
+.DS_Store
+node_modules/
+# private dispatch history and session data never belong here
+track.jsonl
+*.jsonl
+oc-inventory.json
+backups/
