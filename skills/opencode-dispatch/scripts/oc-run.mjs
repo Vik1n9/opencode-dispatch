@@ -11,8 +11,13 @@
 //                   [--session <id>] [--fork] [--title <t>] [--log <file>]
 //                   [--prompt-file <file> | <message...>]
 //
-// Prints JSON: { ok, exitCode, sessionID, title, agent, model, dir, seconds,
+// Prints JSON: { ok, exitCode, sessionID, rateLimited, limit, title, agent, model, dir, seconds,
 //                text, tools[], steps, cost, tokens, errors[], log }
+//   rateLimited is true when an error event, a failed tool or stderr shows a quota / rate-limit
+//   failure (provider.quota, status 429, FreeUsageLimitError, "rate limit exceeded");
+//   limit then holds { type, message } (message <= 200 chars), otherwise null. ok stays false.
+//   A rate-limited run records a per-model pause in limits.json (oc-limits.mjs); a successful
+//   run clears it.
 //
 // Exit codes: 0 run ok, 1 run failed (summary.ok is false), 2 bad arguments or
 // environment check failed.
@@ -22,6 +27,7 @@ import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { checkEnvironment } from './oc-check.mjs';
+import { recordHit, recordSuccess, readLimits } from './oc-limits.mjs';
 
 const argv = process.argv.slice(2);
 const opts = { fork: false, agent: 'build', dir: process.cwd() };
@@ -61,6 +67,7 @@ if (opts.fork && !opts.session) fail('--fork needs --session');
 if (opts.agent !== 'build' && opts.agent !== 'plan') fail(`unknown agent: ${opts.agent} (expected build or plan)`);
 const env = checkEnvironment();
 if (!env.ok) fail(env.error);
+readLimits(); // surface a corrupt limits.json once, before the run records anything
 
 try {
   if (!opts.log) {
@@ -79,6 +86,23 @@ if (opts.session) args.push('-s', opts.session);
 if (opts.fork) args.push('--fork');
 if (opts.title) args.push('--title', opts.title);
 args.push(opts.prompt);
+
+const LIMIT_TEXT = /freeusagelimiterror|rate limit exceeded/i;
+const LIMIT_EVENT = /"status"\s*:\s*429\b|"type"\s*:\s*"provider\.quota"/;
+// Return { type, message } for a quota / rate-limit failure, or null; value may be an event
+// error object, a failed tool's error, or raw stderr text.
+function rateLimit(value) {
+  const raw = typeof value === 'string' ? value : JSON.stringify(value ?? '');
+  const hit = LIMIT_TEXT.test(raw) || LIMIT_EVENT.test(raw) || value?.type === 'provider.quota' || value?.status === 429;
+  if (!hit) return null;
+  let o = value;
+  if (typeof value === 'string') {
+    try { o = JSON.parse(value); } catch { o = null; }
+  }
+  const e = o?.error && typeof o.error === 'object' ? o.error : (o ?? {});
+  const message = e.message ?? (typeof value === 'string' ? value : raw);
+  return { type: String(e.type ?? e.status ?? 'rate limit'), message: String(message).slice(0, 200) };
+}
 
 const started = Date.now();
 // opencode picks its project from $PWD, not the process cwd, so set both
@@ -134,6 +158,8 @@ child.on('close', (code) => {
     ok: code === 0 && !stoppedBy,
     exitCode: code,
     sessionID: null,
+    rateLimited: false,
+    limit: null,
     title: opts.title ?? null,
     agent: opts.agent,
     model: opts.model,
@@ -159,23 +185,41 @@ child.on('close', (code) => {
       const input = p.state?.input ?? {};
       const brief = input.command ?? input.filePath ?? input.path ?? input.pattern ?? '';
       summary.tools.push(`${p.tool}:${p.state?.status ?? '?'}${brief ? ' ' + String(brief).slice(0, 120) : ''}`);
-      if (p.state?.status === 'error') summary.errors.push(String(p.state?.error ?? '').slice(0, 300));
+      if (p.state?.status === 'error') {
+        summary.errors.push(String(p.state?.error ?? '').slice(0, 300));
+        summary.limit ??= rateLimit(p.state?.error);
+      }
     } else if (ev.type === 'step_finish') {
       summary.steps++;
       summary.cost += p.cost ?? 0;
       for (const k of ['input', 'output', 'reasoning']) summary.tokens[k] += p.tokens?.[k] ?? 0;
     } else if (ev.type === 'error') {
       summary.errors.push(JSON.stringify(ev.error ?? ev).slice(0, 300));
+      summary.limit ??= rateLimit(ev.error ?? ev);
     }
   }
   // The final answer is the last text part; earlier ones are interim narration.
   summary.text = texts.at(-1) ?? '';
   summary.cost = Math.round(summary.cost * 1e6) / 1e6;
-  if (err.trim()) summary.errors.push(`stderr: ${err.trim().slice(0, 500)}`);
+  if (err.trim()) {
+    summary.errors.push(`stderr: ${err.trim().slice(0, 500)}`);
+    summary.limit ??= rateLimit(err.trim());
+  }
+  if (summary.limit) {
+    summary.rateLimited = true;
+    summary.ok = false; // a quota failure never counts as a usable run
+  }
   if (logError) summary.errors.push(`log write failed: ${logError.message}`);
   if (intIgnored) summary.errors.push('ignored SIGINT');
   if (stoppedBy) summary.errors.push(`stopped by ${stoppedBy}`);
   if (code === 0 && !summary.sessionID) summary.ok = false;
+  // Bookkeeping is best-effort: a read-only HOME must not lose the run's result.
+  try {
+    if (summary.rateLimited) recordHit(opts.model, summary.limit.message);
+    else if (summary.ok) recordSuccess(opts.model);
+  } catch (e) {
+    summary.errors.push(`limits write failed: ${e.message}`);
+  }
   console.log(JSON.stringify(summary, null, 2));
-  process.exit(summary.ok ? (code ?? 0) : (code || 1));
+  process.exit(summary.ok ? 0 : 1);
 });

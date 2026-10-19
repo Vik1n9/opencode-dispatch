@@ -19,6 +19,9 @@
 //                   folder is created
 //   --only <id>     probe just this model and merge the result into --cache (use when a cached model fails
 //                   at dispatch time); needs a cache from a full run
+// --probe records a rate-limited model as paused in limits.json (oc-limits.mjs) with error
+// `rate limited (paused)`, and clears the pause on success; re-probe a due model with
+// `--probe --only <id> --cache <file>`.
 //
 // Warnings (official page unreadable or empty, local catalog unavailable) go to stderr and into the cache.
 // Exit codes: 0 ok, 2 blocked environment or bad usage (--concurrency / --timeout not a positive integer,
@@ -29,6 +32,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { checkEnvironment } from './oc-check.mjs';
+import { recordHit, recordSuccess, readLimits } from './oc-limits.mjs';
 
 const argv = process.argv.slice(2);
 const has = (f) => argv.includes(f);
@@ -57,6 +61,7 @@ const warnings = [];
 
 const env = checkEnvironment();
 if (!env.ok) { console.error(env.error); process.exit(2); }
+if (has('--probe')) readLimits(); // surface a corrupt limits.json once, before probes record anything
 
 // --only merges into a cache from a full run; refuse before probing when that cache is missing or unreadable.
 let priorCache = null;
@@ -164,6 +169,22 @@ if (only) {
 }
 
 /* ---------- 4. Local probe ---------- */
+const LIMIT_TEXT = /freeusagelimiterror|rate limit exceeded/i;
+const LIMIT_EVENT = /"status"\s*:\s*429\b|"type"\s*:\s*"provider\.quota"/;
+// Same classification as oc-run.mjs: quota / 429 / FreeUsageLimitError, in an error event,
+// a failed tool or stderr.
+function rateLimit(value) {
+  const raw = typeof value === 'string' ? value : JSON.stringify(value ?? '');
+  const hit = LIMIT_TEXT.test(raw) || LIMIT_EVENT.test(raw) || value?.type === 'provider.quota' || value?.status === 429;
+  if (!hit) return null;
+  let o = value;
+  if (typeof value === 'string') {
+    try { o = JSON.parse(value); } catch { o = null; }
+  }
+  const e = o?.error && typeof o.error === 'object' ? o.error : (o ?? {});
+  return { type: String(e.type ?? e.status ?? 'rate limit'), message: String(e.message ?? (typeof value === 'string' ? value : raw)).slice(0, 200) };
+}
+
 // Settles exactly once: on close, on a spawn error, or after the SIGKILL deadline. A child that ignores SIGTERM,
 // or a grandchild holding the stdout pipe open, therefore cannot hang Promise.all.
 async function probeOne(m) {
@@ -171,6 +192,7 @@ async function probeOne(m) {
   return new Promise((resolve) => {
     let settled = false;
     let out = '';
+    let err = '';
     const timers = [];
     const finish = (code, spawnError) => {
       if (settled) return;
@@ -180,23 +202,38 @@ async function probeOne(m) {
       child.stdout?.destroy();
       child.stderr?.destroy();
       const seconds = Math.round((Date.now() - started) / 100) / 10;
-      let reply = '', error = '';
+      let reply = '', error = '', limit = null;
       for (const line of out.split('\n')) {
         try {
           const ev = JSON.parse(line);
           if (ev.type === 'text' && ev.part?.text) reply = ev.part.text;
-          if (ev.type === 'error') error = ev.error?.message || JSON.stringify(ev.error);
+          if (ev.type === 'error') {
+            error = ev.error?.message || JSON.stringify(ev.error);
+            limit ??= rateLimit(ev.error ?? ev);
+          } else if (ev.type === 'tool_use' && ev.part?.state?.status === 'error') {
+            limit ??= rateLimit(ev.part.state.error);
+          }
         } catch { /* not json */ }
       }
+      if (!limit) limit = rateLimit(err);
+      const ok = code === 0 && /42/.test(reply);
       if (spawnError) error = `cannot start opencode: ${spawnError.code || spawnError.message}`;
+      else if (limit) error = 'rate limited (paused)';
       else if (seconds >= timeoutS) error ||= `timeout ${timeoutS}s`;
       if (/no-route|unavailable/i.test(error)) error = 'not in local opencode yet (official list has it)';
-      resolve({ ok: code === 0 && /42/.test(reply), seconds, error: error.slice(0, 160) });
+      try {
+        if (limit) recordHit(m.id, limit.message);
+        else if (ok) recordSuccess(m.id);
+      } catch (e) {
+        warnings.push(`cannot update limits.json: ${e.message}`);
+      }
+      resolve({ ok, seconds, error: error.slice(0, 160) });
     };
     const child = spawn('opencode', ['run', '--format', 'json', '-m', m.id, '--agent', 'plan', '--title', probeTitle,
       'Read n.txt and reply with only the number in it.'], { cwd: dir, env: { ...process.env, PWD: dir }, stdio: ['ignore', 'pipe', 'pipe'] });
     child.on('error', (e) => finish(null, e));
     child.stdout?.on('data', (d) => (out += d));
+    child.stderr?.on('data', (d) => (err += d));
     child.on('close', (code) => finish(code));
     timers.push(setTimeout(() => {
       child.kill('SIGTERM');

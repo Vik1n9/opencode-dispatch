@@ -4,7 +4,8 @@
 //      not logged in there, so the dispatch fails in confusing ways);
 //   2. opencode is on PATH;
 //   3. it is a supported major version (2.x) — the scripts depend on its behavior
-//      (`run --format json` event shapes, `-s` / `--fork`, $PWD project selection, `models` output);
+//      (`run --format json` event shapes, `-s` / `--fork`, $PWD project selection,
+//      `api GET /api/model`, `session list` / `session delete`, `auth list`);
 //   4. at least one provider is logged in — without a credential every dispatch fails.
 //
 // Usage:

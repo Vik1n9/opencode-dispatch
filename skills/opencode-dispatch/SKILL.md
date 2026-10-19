@@ -71,9 +71,12 @@ opencode's free models change often, and anonymous (stealth) models appear from 
    - Categories (defined in the score table): `repo-coding` (fix bugs / add features in an existing codebase), `terminal` (terminal work, running tests, scripts), `greenfield` (new projects, large refactors), `tools` (multi-step tool calling), `gui-vision` (screenshots, GUIs), `reasoning` (reasoning, planning), `security` (security review), `instruction` (format-following rewrites, translation, data cleanup), `long-context`; `--task all` lists every category.
    - When continuing a long session or reading many files, add `--min-context <tokens>` to drop entries whose context is too small (e.g. free entries have only 200k); usable models whose context is unknown are dropped too and listed (`droppedUnknownContext` in the `--json` output).
    - Models the official live list no longer has (inventory shows "not on live list") are excluded from ranking and shadow runs. The output ends with the shadow-run candidates (one entry per model, the cheapest plan); with `--json`, stealth entries are in `shadow` and models missing from the table in `notInTable`. A trail line "gaps are not transitive" means the leader was chosen by the primary benchmark.
+   - While the free usage limit lasts, add `--no-free`: free entries leave the ranking and shadow runs are paused (see "Free usage limit" under dispatch mode).
+   - Rate-limited models recorded in `limits.json` are left out of ranking and shadow runs automatically; `oc-limits.mjs status` shows them and `DUE` marks a re-probe.
 4. **Check allowance before dispatching** (user, 2026-10-19): `node ~/.agents/skills/opencode-dispatch/scripts/oc-quota.mjs`. The numbers come from `status.json` exported by the user's TokenBar menu-bar app; no API keys are touched. Verdicts rank `low` > `stale` > `ok`: a low balance sampled long ago still says `low` — do not dispatch. A sample with no usable time, older than 60 minutes, or dated more than 5 minutes in the future counts as `stale`; stale data may be used, but mention it in the report.
    - DeepSeek: reads `deepseek.<currency>` from `status.json` (falls back to `deepseek-ledger.json`). `low` (under $1; the threshold applies to USD balances only) → do not dispatch pay-as-you-go DeepSeek; use the next model in the ranking.
    - Qwen token plan: reads `qwen.percentLeft` from `status.json` (with the reset date); under 10% is `low` → use the next model in the ranking. When `unknown` (TokenBar not running or not exporting), ask the user to glance at the menu bar before sending a lot of work to Qwen, and note "Qwen allowance not confirmed" in the report.
+   - Go plan: Rolling (5 h) / Weekly / Monthly usage and reset countdowns are on the OpenCode Console overview (`https://opencode.ai/console`). When Go allowance matters, open it in the built-in browser and read them; never sign in for the user.
    - Zen free models need no allowance check, but they are rate-limited; too much parallelism gets blocked.
 5. **A model fails at dispatch time** (cannot be called, expired key): re-probe just that one and update the cache — `oc-models.mjs --probe --cache <scratchpad>/oc-inventory.json --only <model ID>` — then rank again. No full re-inventory. `--only` needs an existing cache from a full run and an ID in the official lists or the local catalog; anything else exits 2 and leaves the cache untouched.
 
@@ -129,6 +132,12 @@ opencode is the subagent, Claude is the manager. **Split tasks and dispatch them
    - Tick off the definition of done item by item.
 6. **Return**: if it falls short, continue the same `--session` and state: what does not meet the spec (file:line), why, the direction to change, and this round's definition of done. Each return covers only what needs changing; do not repeat the whole background.
 7. **Wrap up**: once it meets the goal, report to the user: number of rounds, each round's problems and fixes, how many returns and why, the model used, total `cost`. Ask the user before merging, pushing or deploying.
+
+**Free usage limit** (user, 2026-10-19): the limit applies per model id, so a hit pauses only that model — recorded and applied automatically (`oc-limits.mjs`; re-probe at 1 h, 3 h, 6 h, 24 h, then every 24 h).
+- At the start of each dispatch round run `oc-limits.mjs status`; re-probe every `DUE` model with `oc-models.mjs --probe --only <id> --cache <cache>`.
+- A paused model is left out of ranking and shadow runs until a probe or normal run succeeds; it is not retried as a shadow or formal run while paused.
+- Shadow run hits the limit: stop, no `oc-track.mjs` record (no score this round). Formal run: stop and ask the user before switching to a paid model; never switch silently.
+- `--no-free` is the manual "pause every free model" switch (drops all Zen free entries and pauses shadow runs).
 
 ## Safety rules
 
