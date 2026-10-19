@@ -15,32 +15,66 @@
 // Usage: node oc-models.mjs [--probe] [--no-go] [--concurrency 6] [--timeout 120] [--json]
 //                           [--cache <file>] [--only <model-id>]
 //   --cache <file>  write the inventory (with probe results) to a session cache file; later dispatches in the
-//                   same session read it via oc-rank.mjs instead of re-running this script
+//                   same session read it via oc-rank.mjs instead of re-running this script; a missing parent
+//                   folder is created
 //   --only <id>     probe just this model and merge the result into --cache (use when a cached model fails
-//                   at dispatch time)
+//                   at dispatch time); needs a cache from a full run
+//
+// Warnings (official page unreadable or empty, local catalog unavailable) go to stderr and into the cache.
+// Exit codes: 0 ok, 2 blocked environment or bad usage (--concurrency / --timeout not a positive integer,
+// --only unknown or with a missing / unparseable cache).
 
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { checkEnvironment } from './oc-check.mjs';
 
 const argv = process.argv.slice(2);
 const has = (f) => argv.includes(f);
 const val = (f, d) => { const i = argv.indexOf(f); return i >= 0 && argv[i + 1] ? argv[i + 1] : d; };
-const concurrency = Number(val('--concurrency', 6));
-const timeoutS = Number(val('--timeout', 120));
+// An explicit flag with no value is invalid too, so read the raw slot instead of falling back to the default.
+const positiveInt = (flag, d) => {
+  const i = argv.indexOf(flag);
+  const raw = i < 0 ? d : argv[i + 1];
+  if (!/^\d+$/.test(String(raw)) || Number(raw) < 1) {
+    console.error(`usage: ${flag} must be a positive integer`);
+    process.exit(2);
+  }
+  return Number(raw);
+};
+const concurrency = positiveInt('--concurrency', 6);
+const timeoutS = positiveInt('--timeout', 120);
+const probeTitle = `oc-models-probe-${process.pid}-${Date.now()}`;
+const only = val('--only', null);
+const cachePath = val('--cache', null);
 const ZEN_DOCS = 'https://opencode.ai/docs/zen/';
 const ZEN_LIVE = 'https://opencode.ai/zen/v1/models';
 const GO_DOCS = 'https://opencode.ai/docs/go/';
 const GO_LIVE = 'https://opencode.ai/zen/go/v1/models';
 const HOSTED = new Set(['opencode', 'opencode-go']); // OpenCode's own (Zen / Go): official information wins
+const warnings = [];
 
 const env = checkEnvironment();
 if (!env.ok) { console.error(env.error); process.exit(2); }
 
+// --only merges into a cache from a full run; refuse before probing when that cache is missing or unreadable.
+let priorCache = null;
+if (only && cachePath) {
+  try { priorCache = JSON.parse(readFileSync(cachePath, 'utf8')); } catch { priorCache = null; }
+  if (!priorCache || !Array.isArray(priorCache.models)) {
+    console.error(`--only needs an existing cache from a full run: ${cachePath}`);
+    process.exit(2);
+  }
+}
+
 const dir = mkdtempSync(join(tmpdir(), 'oc-models-'));
-const oc = (args) => spawnSync('opencode', args, { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, PWD: dir } }).stdout || '';
+// 60 s: a hung background service must not block the inventory forever; failures surface as warnings.
+const oc = (args) => {
+  const r = spawnSync('opencode', args, { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+    timeout: 60000, env: { ...process.env, PWD: dir } });
+  return r.error || r.status !== 0 ? '' : r.stdout || '';
+};
 
 /* ---------- 1–2. Official: Zen pricing + model IDs, checked against the live list ---------- */
 const text = (s) => s.replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&[a-z#0-9]+;/g, ' ').trim();
@@ -49,7 +83,9 @@ try {
   const html = await (await fetch(ZEN_DOCS)).text();
   const rows = [...html.matchAll(/<tr[^>]*>([\s\S]*?)<\/tr>/g)].map((m) => [...m[1].matchAll(/<t[dh][^>]*>([\s\S]*?)<\/t[dh]>/g)].map((c) => text(c[1])));
   const idOf = new Map(rows.filter((r) => r.length === 4 && r[1] && r[1] !== 'Model ID').map((r) => [r[0], r[1]]));
-  const live = new Set(((await (await fetch(ZEN_LIVE)).json()).data || []).map((m) => m.id));
+  const liveIds = ((await (await fetch(ZEN_LIVE)).json()).data || []).map((m) => m.id);
+  if (!liveIds.length) throw new Error('Zen live list returned no models');
+  const live = new Set(liveIds);
   const seen = new Set();
   for (const r of rows) {
     if (r.length !== 5 || r[1] !== 'Free' || r[2] !== 'Free' || seen.has(r[0])) continue;
@@ -57,6 +93,9 @@ try {
     const id = idOf.get(r[0]) ?? null;
     official.push({ id: id ? `opencode/${id}` : null, name: r[0], source: 'official', cost: 'free', live: id ? live.has(id) : null });
   }
+  // No Free rows: the page layout changed or the table is rendered client-side. Without an error every local
+  // Zen model would be reported as retired below, so fail loudly instead.
+  if (!official.length) officialError = 'Zen docs page has no Free model rows (layout changed or table is JS-only)';
 } catch (e) {
   officialError = String(e.message || e);
 }
@@ -70,6 +109,11 @@ if (!has('--no-go')) {
     const price = new Map();
     for (const r of rows) if (r.length === 6 && r[0] !== 'Model' && !price.has(norm(r[0].replace(/\s*\(.*\)$/, '')))) price.set(norm(r[0].replace(/\s*\(.*\)$/, '')), r);
     const ids = ((await (await fetch(GO_LIVE)).json()).data || []).map((m) => m.id);
+    // The live list is authoritative; zero IDs means the endpoint changed and every Go model would vanish silently.
+    if (!ids.length) throw new Error('Go live list returned no models');
+    // The price table is matched by normalized name, so a missing table only downgrades prices to "Go(no price)";
+    // say so, because every model then looks equally priced.
+    if (!price.size) warnings.push('Go docs page has no price rows (layout changed); Go models show Go(no price)');
     for (const id of ids) {
       const r = price.get(norm(id));
       const cost = !r ? 'Go(no price)' : r[1] === 'Free' && r[2] === 'Free' ? 'Go free' : `Go ${r[1]}/${r[2]}`;
@@ -83,7 +127,18 @@ if (!has('--no-go')) {
 
 /* ---------- 3. Local catalog: only providers the user registered with an API key; Zen entries are only compared ---------- */
 let localCatalog = [];
-try { localCatalog = JSON.parse(oc(['api', 'GET', '/api/model'])).data || []; } catch { /* background service not running */ }
+{
+  const raw = oc(['api', 'GET', '/api/model']);
+  let why = raw ? '' : 'opencode api GET /api/model failed or timed out';
+  if (!why) {
+    try {
+      localCatalog = JSON.parse(raw).data || [];
+      if (!Array.isArray(localCatalog)) { localCatalog = []; why = 'local catalog has no data array'; }
+      else if (!localCatalog.length) why = 'local catalog returned no models';
+    } catch { why = 'local catalog returned invalid JSON'; }
+  }
+  if (why) warnings.push(`${why}; API-key providers and context lengths are missing`);
+}
 const localIds = new Set(localCatalog.map((m) => `${m.providerID}/${m.modelID}`));
 for (const m of official) m.inLocalCatalog = m.id ? localIds.has(m.id) : false;
 const keyed = localCatalog.filter((m) => !HOSTED.has(m.providerID)).map((m) => {
@@ -100,20 +155,30 @@ for (const m of official) {
   if (l) { m.context = l.limit?.context ?? null; m.image = (l.capabilities?.input || []).includes('image'); }
 }
 let models = [...official, ...keyed].sort((a, b) => String(a.id).localeCompare(String(b.id)));
-const only = val('--only', null);
-if (only) models = models.filter((m) => m.id === only);
+if (only) {
+  if (!models.some((m) => m.id === only)) {
+    console.error(`model not in the official lists or the local catalog: ${only}; cache left unchanged`);
+    process.exit(2);
+  }
+  models = models.filter((m) => m.id === only);
+}
 
 /* ---------- 4. Local probe ---------- */
+// Settles exactly once: on close, on a spawn error, or after the SIGKILL deadline. A child that ignores SIGTERM,
+// or a grandchild holding the stdout pipe open, therefore cannot hang Promise.all.
 async function probeOne(m) {
   const started = Date.now();
   return new Promise((resolve) => {
-    const child = spawn('opencode', ['run', '--format', 'json', '-m', m.id, '--agent', 'plan', '--title', 'oc-models-probe',
-      'Read n.txt and reply with only the number in it.'], { cwd: dir, env: { ...process.env, PWD: dir }, stdio: ['ignore', 'pipe', 'pipe'] });
+    let settled = false;
     let out = '';
-    child.stdout.on('data', (d) => (out += d));
-    const timer = setTimeout(() => child.kill('SIGTERM'), timeoutS * 1000);
-    child.on('close', (code) => {
-      clearTimeout(timer);
+    const timers = [];
+    const finish = (code, spawnError) => {
+      if (settled) return;
+      settled = true;
+      for (const t of timers) clearTimeout(t);
+      // Drop the pipes: a surviving grandchild may still hold stdout open and would keep Node alive.
+      child.stdout?.destroy();
+      child.stderr?.destroy();
       const seconds = Math.round((Date.now() - started) / 100) / 10;
       let reply = '', error = '';
       for (const line of out.split('\n')) {
@@ -123,47 +188,64 @@ async function probeOne(m) {
           if (ev.type === 'error') error = ev.error?.message || JSON.stringify(ev.error);
         } catch { /* not json */ }
       }
-      if (seconds >= timeoutS) error ||= `timeout ${timeoutS}s`;
+      if (spawnError) error = `cannot start opencode: ${spawnError.code || spawnError.message}`;
+      else if (seconds >= timeoutS) error ||= `timeout ${timeoutS}s`;
       if (/no-route|unavailable/i.test(error)) error = 'not in local opencode yet (official list has it)';
       resolve({ ok: code === 0 && /42/.test(reply), seconds, error: error.slice(0, 160) });
-    });
+    };
+    const child = spawn('opencode', ['run', '--format', 'json', '-m', m.id, '--agent', 'plan', '--title', probeTitle,
+      'Read n.txt and reply with only the number in it.'], { cwd: dir, env: { ...process.env, PWD: dir }, stdio: ['ignore', 'pipe', 'pipe'] });
+    child.on('error', (e) => finish(null, e));
+    child.stdout?.on('data', (d) => (out += d));
+    child.on('close', (code) => finish(code));
+    timers.push(setTimeout(() => {
+      child.kill('SIGTERM');
+      timers.push(setTimeout(() => {
+        child.kill('SIGKILL');
+        timers.push(setTimeout(() => finish(null), 5000));
+      }, 5000));
+    }, timeoutS * 1000));
   });
 }
 if (has('--probe')) {
   writeFileSync(join(dir, 'n.txt'), '42\n');
   const queue = models.filter((m) => m.id);
-  await Promise.all(Array.from({ length: Math.max(1, concurrency) }, async () => {
+  await Promise.all(Array.from({ length: concurrency }, async () => {
     for (let m = queue.shift(); m; m = queue.shift()) m.probe = await probeOne(m);
   }));
   try {
+    // Only this run's sessions: a concurrent oc-models run keeps its own title.
     for (const s of JSON.parse(oc(['session', 'list', '-n', '500', '--format', 'json']) || '[]')) {
-      if (s.title === 'oc-models-probe') oc(['session', 'delete', s.id]);
+      if (s.title === probeTitle) oc(['session', 'delete', s.id]);
     }
   } catch { /* the title is recognizable; leave it if it cannot be deleted */ }
 }
 rmSync(dir, { recursive: true, force: true });
 
 /* ---------- Write the session cache ---------- */
-const cachePath = val('--cache', null);
 if (cachePath) {
-  let cache = { created: new Date().toISOString(), officialError, models: [] };
-  if (only && existsSync(cachePath)) {
-    try { cache = JSON.parse(readFileSync(cachePath, 'utf8')); } catch { /* broken file: rebuild */ }
+  let cache = { created: new Date().toISOString(), officialError, warnings, models: [] };
+  if (only) {
+    cache = priorCache;
     cache.models = cache.models.filter((m) => m.id !== only).concat(models);
+    cache.officialError = officialError;
+    cache.warnings = warnings;
     cache.updated = new Date().toISOString();
   } else {
     cache.models = models;
     cache.probed = has('--probe');
   }
+  mkdirSync(dirname(cachePath), { recursive: true });
   writeFileSync(cachePath, JSON.stringify(cache, null, 2));
 }
 
 /* ---------- Output ---------- */
+for (const w of warnings) console.error(`warning: ${w}`);
 // Zen / Go models in the local catalog but not in the official lists: retired or no longer free — do not dispatch
 const retired = localCatalog.filter((m) => HOSTED.has(m.providerID) && !(has('--no-go') && m.providerID === 'opencode-go')
   && !official.some((o) => o.id === `${m.providerID}/${m.modelID}`)).map((m) => `${m.providerID}/${m.modelID}`);
 if (has('--json')) {
-  console.log(JSON.stringify({ officialError, models, notOfficialFreeButLocal: retired }, null, 2));
+  console.log(JSON.stringify({ officialError, warnings, models, notOfficialFreeButLocal: retired }, null, 2));
 } else {
   if (officialError) console.log(`!! cannot read official information (${officialError}) — do not dispatch from the local catalog alone`);
   for (const m of models) {
