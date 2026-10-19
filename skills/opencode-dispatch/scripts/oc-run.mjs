@@ -2,6 +2,9 @@
 // Run one opencode task non-interactively and print a compact summary.
 // Wraps `opencode run --format json`, closing stdin (opencode waits on stdin
 // forever when it is not a TTY) and saving the raw JSONL event log to a file.
+// opencode runs in its own process group, so signals sent to the caller's group
+// never reach it. oc-run ignores SIGINT; `kill <oc-run pid>` (SIGTERM) stops the
+// run cleanly. The `trap '' INT` wrapper is no longer needed.
 //
 // Usage:
 //   node oc-run.mjs --model <provider/model> [--agent build|plan] [--dir <path>]
@@ -83,10 +86,33 @@ const child = spawn('opencode', args, {
   cwd: opts.dir,
   env: { ...process.env, PWD: opts.dir },
   stdio: ['ignore', 'pipe', 'pipe'],
+  detached: true,
 });
 let out = '';
 let err = '';
 let logError = null;
+let closed = false;
+let stoppedBy = null;
+let intIgnored = false;
+let killTimer = null;
+
+const killGroup = (signal) => {
+  if (!child.pid) return;
+  try { process.kill(-child.pid, signal); } catch {}
+};
+
+// A group SIGINT must neither kill the run nor orphan opencode, so ignore it.
+process.on('SIGINT', () => { intIgnored = true; });
+const stop = (signal) => {
+  if (closed || stoppedBy) return;
+  stoppedBy = signal;
+  killGroup('SIGTERM');
+  killTimer = setTimeout(() => killGroup('SIGKILL'), 10_000);
+};
+process.on('SIGTERM', () => stop('SIGTERM'));
+process.on('SIGHUP', () => stop('SIGHUP'));
+// Never leave an orphan behind if oc-run exits for any other reason.
+process.on('exit', () => { if (!closed) killGroup('SIGKILL'); });
 // Stream events to the log as they arrive so a long run can be watched (tail -f / read the log).
 // A log write must never orphan the child or lose collected output.
 child.stdout.on('data', (d) => {
@@ -96,11 +122,16 @@ child.stdout.on('data', (d) => {
   catch (e) { logError = e; }
 });
 child.stderr.on('data', (d) => (err += d));
-child.on('error', (e) => fail(`cannot start opencode: ${e.message}`));
+child.on('error', (e) => {
+  if (!closed) killGroup('SIGTERM');
+  fail(`cannot start opencode: ${e.message}`);
+});
 child.on('close', (code) => {
+  closed = true;
+  if (killTimer) clearTimeout(killTimer);
 
   const summary = {
-    ok: code === 0,
+    ok: code === 0 && !stoppedBy,
     exitCode: code,
     sessionID: null,
     title: opts.title ?? null,
@@ -142,6 +173,8 @@ child.on('close', (code) => {
   summary.cost = Math.round(summary.cost * 1e6) / 1e6;
   if (err.trim()) summary.errors.push(`stderr: ${err.trim().slice(0, 500)}`);
   if (logError) summary.errors.push(`log write failed: ${logError.message}`);
+  if (intIgnored) summary.errors.push('ignored SIGINT');
+  if (stoppedBy) summary.errors.push(`stopped by ${stoppedBy}`);
   if (code === 0 && !summary.sessionID) summary.ok = false;
   console.log(JSON.stringify(summary, null, 2));
   process.exit(summary.ok ? (code ?? 0) : (code || 1));
