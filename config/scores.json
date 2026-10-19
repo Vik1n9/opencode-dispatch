@@ -132,13 +132,13 @@
       "internal": {
         "repo-coding": {
           "score": 100,
-          "n": 6,
+          "n": 7,
           "updated": "2026-10-19",
           "speed": {
             "opencode/deepseek-v4.1-flash-free": {
-              "ratio": 2.76,
-              "n": 1,
-              "medianSeconds": 374
+              "ratio": 3.24,
+              "n": 2,
+              "medianSeconds": 309
             },
             "deepseek/deepseek-flash": {
               "ratio": 1,
@@ -479,14 +479,14 @@
       "scores": {},
       "internal": {
         "repo-coding": {
-          "score": 75,
-          "n": 1,
+          "score": 85,
+          "n": 2,
           "updated": "2026-10-19",
           "speed": {
             "opencode/beam-free": {
               "ratio": 1,
-              "n": 1,
-              "medianSeconds": 229
+              "n": 2,
+              "medianSeconds": 147
             }
           }
         }
@@ -502,14 +502,14 @@
       "scores": {},
       "internal": {
         "repo-coding": {
-          "score": 90,
-          "n": 1,
+          "score": 92.5,
+          "n": 2,
           "updated": "2026-10-19",
           "speed": {
             "opencode/space-bunny-free": {
-              "ratio": 3.65,
-              "n": 1,
-              "medianSeconds": 837
+              "ratio": 3.63,
+              "n": 2,
+              "medianSeconds": 536
             }
           }
         }
