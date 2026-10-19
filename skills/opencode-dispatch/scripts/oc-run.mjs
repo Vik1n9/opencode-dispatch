@@ -10,11 +10,14 @@
 //
 // Prints JSON: { ok, exitCode, sessionID, title, agent, model, dir, seconds,
 //                text, tools[], steps, cost, tokens, errors[], log }
+//
+// Exit codes: 0 run ok, 1 run failed (summary.ok is false), 2 bad arguments or
+// environment check failed.
 
 import { spawn } from 'node:child_process';
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { checkEnvironment } from './oc-check.mjs';
 
 const argv = process.argv.slice(2);
@@ -26,14 +29,21 @@ for (let i = 0; i < argv.length; i++) {
     if (i + 1 >= argv.length) fail(`${a} needs a value`);
     return argv[++i];
   };
-  if (a === '--model' || a === '-m') opts.model = next();
+  if (a === '--') {
+    words.push(...argv.slice(i + 1));
+    break;
+  } else if (a === '--model' || a === '-m') opts.model = next();
   else if (a === '--agent') opts.agent = next();
   else if (a === '--dir') opts.dir = resolve(next());
   else if (a === '--session' || a === '-s') opts.session = next();
   else if (a === '--fork') opts.fork = true;
   else if (a === '--title') opts.title = next();
   else if (a === '--log') opts.log = resolve(next());
-  else if (a === '--prompt-file') opts.prompt = readFileSync(next(), 'utf8');
+  else if (a === '--prompt-file') {
+    const file = next();
+    try { opts.prompt = readFileSync(file, 'utf8'); }
+    catch (e) { fail(`cannot read --prompt-file ${file}: ${e.message}`); }
+  } else if (a.startsWith('-')) fail(`unknown option: ${a}`);
   else words.push(a);
 }
 if (!opts.prompt) opts.prompt = words.join(' ');
@@ -45,13 +55,20 @@ function fail(msg) {
 if (!opts.model) fail('--model is required (provider/model, see `opencode models`); the opencode default is unpredictable');
 if (!opts.prompt.trim()) fail('empty prompt');
 if (opts.fork && !opts.session) fail('--fork needs --session');
+if (opts.agent !== 'build' && opts.agent !== 'plan') fail(`unknown agent: ${opts.agent} (expected build or plan)`);
 const env = checkEnvironment();
 if (!env.ok) fail(env.error);
 
-if (!opts.log) {
-  const dir = join(tmpdir(), 'oc-run');
-  mkdirSync(dir, { recursive: true });
-  opts.log = join(dir, `${Date.now()}-${process.pid}.jsonl`);
+try {
+  if (!opts.log) {
+    const dir = join(tmpdir(), 'oc-run');
+    mkdirSync(dir, { recursive: true });
+    opts.log = join(dir, `${Date.now()}-${process.pid}.jsonl`);
+  }
+  mkdirSync(dirname(opts.log), { recursive: true });
+  writeFileSync(opts.log, '');
+} catch (e) {
+  fail(`cannot open log file: ${e.message}`);
 }
 
 const args = ['run', '--format', 'json', '-m', opts.model, '--agent', opts.agent];
@@ -69,9 +86,15 @@ const child = spawn('opencode', args, {
 });
 let out = '';
 let err = '';
-writeFileSync(opts.log, '');
-// Stream events to the log as they arrive so a long run can be watched (tail -f / read the log)
-child.stdout.on('data', (d) => { out += d; appendFileSync(opts.log, d); });
+let logError = null;
+// Stream events to the log as they arrive so a long run can be watched (tail -f / read the log).
+// A log write must never orphan the child or lose collected output.
+child.stdout.on('data', (d) => {
+  out += d;
+  if (logError) return;
+  try { appendFileSync(opts.log, d); }
+  catch (e) { logError = e; }
+});
 child.stderr.on('data', (d) => (err += d));
 child.on('error', (e) => fail(`cannot start opencode: ${e.message}`));
 child.on('close', (code) => {
@@ -118,7 +141,8 @@ child.on('close', (code) => {
   summary.text = texts.at(-1) ?? '';
   summary.cost = Math.round(summary.cost * 1e6) / 1e6;
   if (err.trim()) summary.errors.push(`stderr: ${err.trim().slice(0, 500)}`);
+  if (logError) summary.errors.push(`log write failed: ${logError.message}`);
   if (code === 0 && !summary.sessionID) summary.ok = false;
   console.log(JSON.stringify(summary, null, 2));
-  process.exit(code ?? 1);
+  process.exit(summary.ok ? (code ?? 0) : (code || 1));
 });

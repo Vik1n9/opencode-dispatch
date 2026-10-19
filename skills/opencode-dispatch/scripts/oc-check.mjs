@@ -8,11 +8,15 @@
 //   4. at least one provider is logged in — without a credential every dispatch fails.
 //
 // Usage:
-//   node oc-check.mjs                  prints the result; exit 0 ok, 3 missing opencode/credential, 1 blocked
+//   node oc-check.mjs                  prints the result; exit 0 ok, 1 blocked, 3 missing opencode/credential
 //   import { checkEnvironment } from './oc-check.mjs'
 //     -> { ok, code: 'ok'|'blocked'|'missing', version, credentials, error }
 //
+// Output lines: `ok ...` (exit 0), `blocked  <error>` (exit 1), `missing  <error>` (exit 3).
+//
 // The credential rows printed by `opencode auth list` are never returned or logged — only the count.
+// A cold opencode start can exceed the normal timeout right after a reboot, so both commands retry
+// once with a 45 s timeout.
 
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
@@ -25,17 +29,25 @@ const CLOUD_TRUE = ['CLAUDE_CODE_REMOTE', 'CODESPACES', 'REMOTE_CONTAINERS'];
 const CLOUD_SET = ['GITPOD_WORKSPACE_ID', 'DEVCONTAINER', 'KUBERNETES_SERVICE_HOST', 'container'];
 const CONTAINER_FILES = ['/.dockerenv', '/run/.containerenv'];
 
+// Case-insensitive value sets: these variables must be present *and* on for a container/cloud.
+const TRUE_VALUES = ['true', '1', 'yes'];
+const OFF_VALUES = ['', '0', 'false', 'no'];
+const isTrue = (v) => TRUE_VALUES.includes((v ?? '').trim().toLowerCase());
+const isOff = (v) => OFF_VALUES.includes((v ?? '').trim().toLowerCase());
+
 // Which signal says "not the local machine" (null when none does). Plain SSH is allowed.
 function cloudSignal() {
   for (const name of CLOUD_TRUE) {
-    if (process.env[name] === 'true') {
+    const value = process.env[name];
+    if (isTrue(value)) {
       return name === 'CLAUDE_CODE_REMOTE'
-        ? 'running in a cloud session (CLAUDE_CODE_REMOTE=true); this skill only works on the local machine'
-        : `running in a cloud session or container (${name}=true); this skill only works on the local machine`;
+        ? `running in a cloud session (CLAUDE_CODE_REMOTE=${value}); this skill only works on the local machine`
+        : `running in a cloud session or container (${name}=${value}); this skill only works on the local machine`;
     }
   }
   for (const name of CLOUD_SET) {
-    if (process.env[name]) {
+    const value = process.env[name];
+    if (!isOff(value)) {
       return `running in a container (${name} is set); this skill only works on the local machine`;
     }
   }
@@ -64,11 +76,19 @@ function countCredentials(text) {
   return n;
 }
 
+// A cold opencode start can exceed the normal timeout; retry once with a longer one.
+function runOpencode(args) {
+  const options = { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 15000 };
+  const first = spawnSync('opencode', args, options);
+  if (first.error?.code !== 'ETIMEDOUT') return first;
+  return spawnSync('opencode', args, { ...options, timeout: 45000 });
+}
+
 export function checkEnvironment() {
   const cloud = cloudSignal();
   if (cloud) return { ok: false, code: 'blocked', version: null, credentials: null, error: cloud };
 
-  const v = spawnSync('opencode', ['--version'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 15000 });
+  const v = runOpencode(['--version']);
   if (v.error) {
     if (v.error.code === 'ENOENT') {
       return { ok: false, code: 'missing', version: null, credentials: null, error: 'opencode is not installed on this machine; install opencode 2.x first' };
@@ -82,8 +102,13 @@ export function checkEnvironment() {
     return { ok: false, code: 'blocked', version, credentials: null, error: `opencode ${version} is not supported; only opencode ${SUPPORTED_MAJOR}.x works with these scripts` };
   }
 
-  const a = spawnSync('opencode', ['auth', 'list'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 15000 });
-  if (a.error) return { ok: false, code: 'missing', version, credentials: 0, error: `cannot read the opencode credentials: ${a.error.message}` };
+  const a = runOpencode(['auth', 'list']);
+  if (a.error || a.status !== 0) {
+    const why = a.error
+      ? (a.error.code === 'ETIMEDOUT' ? 'timed out' : a.error.message)
+      : `exited ${a.status}`;
+    return { ok: false, code: 'missing', version, credentials: 0, error: `cannot read the opencode credentials (opencode auth list ${why}); opencode may still be starting, run the check again` };
+  }
   const credentials = countCredentials(`${a.stdout}\n${a.stderr}`);
   if (credentials === 0) {
     return { ok: false, code: 'missing', version, credentials: 0, error: 'opencode has no logged-in provider; run `opencode auth login` on this machine first' };
@@ -94,6 +119,6 @@ export function checkEnvironment() {
 
 if (process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))) {
   const r = checkEnvironment();
-  console.log(r.ok ? `ok       local machine, opencode ${r.version}, ${r.credentials} credentials` : `blocked  ${r.error}`);
+  console.log(r.ok ? `ok       local machine, opencode ${r.version}, ${r.credentials} credentials` : `${r.code}  ${r.error}`);
   process.exit(r.ok ? 0 : r.code === 'missing' ? 3 : 1);
 }
