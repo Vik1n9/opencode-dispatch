@@ -4,7 +4,8 @@ A [Claude Code](https://claude.com/claude-code) skill that turns Claude into a d
 
 ## What it does
 
-- **Safe wrapper around `opencode run`** (`oc-run.mjs`): closes stdin (opencode hangs otherwise), sets `PWD` so the right project is used, requires an explicit model, streams the raw JSONL to a log, and prints a compact JSON summary.
+- **Local-only environment check** (`oc-check.mjs`): verifies this is the local machine (no cloud session / container), opencode 2.x is installed, and at least one provider is logged in; the dispatch scripts and `install.sh` run it first.
+- **Safe wrapper around `opencode run`** (`oc-run.mjs`): closes stdin (opencode hangs otherwise), sets `PWD` so the right project is used, requires an explicit model, streams the raw JSONL to a log, and prints a compact JSON summary. opencode runs in its own process group, so a SIGINT to the caller never kills the run; sending SIGTERM to the wrapper stops it cleanly.
 - **Official-first model inventory** (`oc-models.mjs`): reads the OpenCode Zen / Go docs and live model lists, adds API-key providers from the local catalog, and optionally probes every model on this machine. Results are cached per session.
 - **Capability-first ranking** (`oc-rank.mjs`): compares models only on the benchmarks of the task's category (repo coding, terminal, greenfield, tools, GUI / vision, reasoning, security, instruction following, long context), blends in an internal score from your own dispatch history, then applies plan and speed rules (flat-rate token plan first, free before paid, pay-as-you-go only when nothing close is cheaper).
 - **Track record and internal score** (`oc-track.mjs`): every reviewed dispatch is graded with a fixed formula (returns, major / minor defects, scope violations, failed test reruns) and task completion speed is compared across models that ran the same task.
@@ -26,7 +27,7 @@ install.sh                  links the skill and score table into place
 ## Requirements
 
 - Node.js 18+ (scripts use only built-in modules)
-- **opencode CLI 2.x only** (tested with 2.0.32), **logged in** (`opencode auth login`) for the providers you want to use. `oc-run.mjs`, `oc-models.mjs` and `install.sh` run `scripts/oc-check.mjs`, which refuses any other major version and any machine with no logged-in provider; check by hand with `node skills/opencode-dispatch/scripts/oc-check.mjs`
+- **opencode CLI 2.x only** (tested with 2.0.32), **logged in** (`opencode auth login`) for the providers you want to use. `oc-run.mjs` and `oc-models.mjs` run `scripts/oc-check.mjs` and refuse to start unless it prints `ok`; `install.sh` stops only in a cloud session / container or on a wrong opencode major version, and only warns (still linking everything) when opencode is missing or no provider is logged in. Check by hand with `node skills/opencode-dispatch/scripts/oc-check.mjs`
 - Claude Code (or another agent that loads skills from `~/.agents/skills` / `~/.claude/skills`)
 - Optional: TokenBar, for `oc-quota.mjs`
 
@@ -56,6 +57,10 @@ node ~/.agents/skills/opencode-dispatch/scripts/oc-run.mjs --model <provider/mod
 ```
 
 In practice you just ask Claude Code to "dispatch this to opencode" and the skill drives these steps.
+
+## Tests
+
+`node --test tests/` runs the test suite: no network, no real opencode (fake shims on `PATH`), and a temp `HOME`, so nothing touches your real config or score table.
 
 ## Notes
 
