@@ -15,7 +15,7 @@ import { spawn } from 'node:child_process';
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { checkOpencode } from './oc-version.mjs';
+import { checkEnvironment } from './oc-check.mjs';
 
 const argv = process.argv.slice(2);
 const opts = { fork: false, agent: 'build', dir: process.cwd() };
@@ -45,8 +45,8 @@ function fail(msg) {
 if (!opts.model) fail('--model is required (provider/model, see `opencode models`); the opencode default is unpredictable');
 if (!opts.prompt.trim()) fail('empty prompt');
 if (opts.fork && !opts.session) fail('--fork needs --session');
-const version = checkOpencode();
-if (!version.ok) fail(version.error);
+const env = checkEnvironment();
+if (!env.ok) fail(env.error);
 
 if (!opts.log) {
   const dir = join(tmpdir(), 'oc-run');

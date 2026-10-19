@@ -26,9 +26,13 @@ install.sh                  links the skill and score table into place
 ## Requirements
 
 - Node.js 18+ (scripts use only built-in modules)
-- **opencode CLI 2.x only** (tested with 2.0.32), with the providers you want to use already authenticated. `oc-run.mjs`, `oc-models.mjs` and `install.sh` check `opencode --version` and refuse any other major version; check by hand with `node skills/opencode-dispatch/scripts/oc-version.mjs`
+- **opencode CLI 2.x only** (tested with 2.0.32), **logged in** (`opencode auth login`) for the providers you want to use. `oc-run.mjs`, `oc-models.mjs` and `install.sh` run `scripts/oc-check.mjs`, which refuses any other major version and any machine with no logged-in provider; check by hand with `node skills/opencode-dispatch/scripts/oc-check.mjs`
 - Claude Code (or another agent that loads skills from `~/.agents/skills` / `~/.claude/skills`)
 - Optional: TokenBar, for `oc-quota.mjs`
+
+## Local machine only
+
+The skill refuses to run in Claude Code cloud sessions, containers / devcontainers / Codespaces, and on machines where opencode is missing, not 2.x, or not logged in (`scripts/oc-check.mjs`; `oc-run.mjs` and `oc-models.mjs` repeat the check, and `install.sh` stops or warns). Cloud and Cowork sessions do not read `~/.claude/skills`, so the skill is not loaded there as long as you do not enable it for your claude.ai account and do not copy it into a repository's `.claude/skills/`. Once the skill is loaded and the environment check passes, dispatch mode is on by default until you ask Claude to stop.
 
 ## Install
 
@@ -38,7 +42,7 @@ cd opencode-dispatch
 ./install.sh
 ```
 
-`install.sh` first checks the opencode version (it stops on anything other than 2.x; a missing opencode only prints a warning), then symlinks `skills/opencode-dispatch` into `~/.agents/skills/` (and `~/.claude/skills/` if missing) and `config/scores.json` into `~/.config/opencode-dispatch/`. Anything already in the way is moved to `~/.config/opencode-dispatch/backups/<timestamp>/`. Because the score table is a symlink, internal scores written by `oc-track.mjs` show up as changes in this repository.
+`install.sh` first runs `scripts/oc-check.mjs`: in a cloud session / container or on opencode other than 2.x it stops (exit 1) before linking anything; a missing opencode or no logged-in provider only prints a warning and the install continues. It then symlinks `skills/opencode-dispatch` into `~/.agents/skills/` (and `~/.claude/skills/` if missing) and `config/scores.json` into `~/.config/opencode-dispatch/`. Anything already in the way is moved to `~/.config/opencode-dispatch/backups/<timestamp>/`. Because the score table is a symlink, internal scores written by `oc-track.mjs` show up as changes in this repository.
 
 ## Quick start
 

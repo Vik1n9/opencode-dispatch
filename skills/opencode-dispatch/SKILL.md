@@ -1,15 +1,20 @@
 ---
 name: opencode-dispatch
-description: Dispatch work to other models (DeepSeek, Qwen, GLM, Kimi, etc.) through the local opencode CLI (CLI mode, not MCP), with Claude Code as the dispatcher — pick the model and agent, continue sessions, run tasks in parallel, collect and verify results. Triggers — the user says "dispatch to opencode", "run it with opencode", "let other models do it", "orchestrate opencode", "opencode subagent", or wants to hand mechanical, parallelizable work to cheaper models.
+description: Dispatch work to other models (DeepSeek, Qwen, GLM, Kimi, etc.) through the local opencode CLI (CLI mode, not MCP), with Claude Code as the dispatcher — pick the model and agent, continue sessions, run tasks in parallel, collect and verify results. Triggers — the user says "dispatch to opencode", "run it with opencode", "let other models do it", "orchestrate opencode", "opencode subagent", or wants to hand mechanical, parallelizable work to cheaper models. Local machine only — not for cloud sessions or containers.
+allowed-tools: Bash(node ${CLAUDE_SKILL_DIR}/scripts/oc-check.mjs)
 ---
 
 # opencode dispatch (CLI mode)
 
 Claude Code is the dispatcher; opencode is the worker. Every call goes through `scripts/oc-run.mjs` — never run `opencode run` directly in Bash.
 
-## Version requirement
+## Environment check (runs when the skill loads)
 
-**Only opencode 2.x is supported** (tested with 2.0.32). The scripts rely on 2.x behavior — `run --format json` event shapes, `-s` / `--fork`, `$PWD` project selection, `opencode models` output — so `oc-run.mjs` and `oc-models.mjs` check `opencode --version` and refuse to run on any other major version. Check by hand with `node ~/.agents/skills/opencode-dispatch/scripts/oc-version.mjs`. If it fails, tell the user; do not work around it by calling `opencode run` directly.
+!`node ${CLAUDE_SKILL_DIR}/scripts/oc-check.mjs`
+
+If that line does not start with `ok` (including when it shows the command itself or `[shell command execution disabled by policy]`), do not use this skill: tell the user the reason and do the work without opencode. Never work around it by calling `opencode run` directly or by installing / logging in to opencode yourself. The check is local only: cloud sessions, containers / devcontainers / Codespaces, and machines where opencode is missing, not 2.x, or not logged in are all refused. `oc-run.mjs` and `oc-models.mjs` repeat the same check before they run.
+
+**Only opencode 2.x is supported** (tested with 2.0.32). The scripts rely on 2.x behavior — `run --format json` event shapes, `-s` / `--fork`, `$PWD` project selection, `opencode models` output — so `oc-run.mjs` and `oc-models.mjs` check `opencode --version` and refuse to run on any other major version. Check by hand with `node ~/.agents/skills/opencode-dispatch/scripts/oc-check.mjs`.
 
 ## Why the wrapper script is mandatory
 
@@ -105,6 +110,8 @@ opencode's free models change often, and anonymous (stealth) models appear from 
 ## Dispatch mode: subagent loop (user's choice)
 
 opencode is the subagent, Claude is the manager. **Split tasks and dispatch them to opencode first; Claude does only what cannot be split off** (user, 2026-10-19): Claude cuts tasks, writes specs, picks models, reviews and merges, and handles parts that need overall judgment or involve credentials / external operations; any implementation that can be written as a standalone, verifiable spec is dispatched. **Dispatch → monitor → review → return with directions → repeat until the result meets the goal.** Claude does not fix the code for it; problems go back to the same session as concrete directions so the model fixes them itself. Claude takes over only when the user asks, or after several returns still fail — and tells the user why.
+
+**On by default** (user, 2026-10-19): once this skill is loaded and the environment check passed, dispatch mode stays on for every later task in the session — dispatch implementation work without being asked again — until the user explicitly says to stop dispatching / turn it off. Turning it off lasts until the user turns it back on.
 
 1. **Cut the task**: one task does one thing. State the scope, which files may / may not change, the definition of done (e.g. "all tests pass, one commit per round"), and what the final report must contain. opencode cannot see this conversation, so put the background in the task description. Use `--prompt-file` for long descriptions.
 2. **Pick the model**: use the user's model if named. Otherwise follow "Choosing a model" above — rank with `oc-rank.mjs` and apply the allocation rules (capability first, not simply cheap and fast); parts that need overall judgment and cannot be written as a spec stay with Claude. When unsure, try a small run with the `plan` agent first. Schedule shadow runs of anonymous models when the conditions hold.
