@@ -10,6 +10,8 @@
 //
 // Usage: node oc-quota.mjs [--json]
 // Prints each provider's remaining amount, when it was sampled, and a verdict (ok / low / unknown / stale).
+// Precedence is low > stale > ok; `stale` is also a separate JSON field, so a low balance sampled long ago
+// (or more than 5 minutes in the future, or with no usable time) stays `low` and text output adds `(stale)`.
 
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -17,12 +19,23 @@ import { join } from 'node:path';
 
 const DIR = join(homedir(), 'Library', 'Application Support', 'TokenBar');
 const APPLE_EPOCH = Date.UTC(2001, 0, 1); // Swift Date reference point (used by the ledger)
-const STALE_MIN = 60;      // older than 60 minutes = not trustworthy
+const STALE_MIN = 60;       // older than 60 minutes = not trustworthy
+const FUTURE_MIN = 5;       // sampled more than this far ahead = clock or data problem
 const DEEPSEEK_LOW_USD = 1; // warn below this balance
 const QWEN_LOW_PCT = 10;    // warn below this percentage left
 
-const toDate = (at) => typeof at === 'number' ? new Date(APPLE_EPOCH + at * 1000) : new Date(at);
+// Missing / unparseable values are null, never an Invalid Date (which crashes toISOString()).
+const toDate = (at) => {
+  if (at === undefined || at === null || at === '') return null;
+  const d = typeof at === 'number' ? new Date(APPLE_EPOCH + at * 1000) : new Date(at);
+  return Number.isNaN(d.getTime()) ? null : d;
+};
 const ageMin = (d) => Math.round((Date.now() - d.getTime()) / 60000);
+// The reset day is what the user sees on the clock, so format it in local time (toISOString would
+// shift it a day for e.g. 2026-11-02T00:00:00+08:00 on a UTC+8 machine).
+const day = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+const staleOf = (age) => age === null || age > STALE_MIN || age < -FUTURE_MIN;
+const timeNotes = (age) => age === null ? ['no sample time'] : age < -FUTURE_MIN ? ['sample time is in the future'] : [];
 const out = [];
 
 let st = null, stError = null;
@@ -37,10 +50,13 @@ if (existsSync(status)) {
 const deepseek = (samples, source) => {
   for (const [cur, s] of Object.entries(samples)) {
     const at = toDate(s.at);
-    const age = ageMin(at);
-    const low = cur === 'USD' ? s.total < DEEPSEEK_LOW_USD : false;
-    out.push({ provider: 'deepseek', unit: cur, remaining: s.total, sampledAt: at.toISOString(), ageMin: age, source,
-      verdict: age > STALE_MIN ? 'stale' : low ? 'low' : 'ok' });
+    const age = at ? ageMin(at) : null;
+    const low = cur === 'USD' && s.total < DEEPSEEK_LOW_USD;
+    const notes = timeNotes(age);
+    if (cur !== 'USD') notes.push('low threshold is defined for USD only');
+    out.push({ provider: 'deepseek', unit: cur, remaining: s.total, sampledAt: at?.toISOString() ?? null, ageMin: age, source,
+      stale: staleOf(age), verdict: low ? 'low' : staleOf(age) ? 'stale' : 'ok',
+      ...(notes.length ? { note: notes.join('; ') } : {}) });
   }
 };
 if (st?.deepseek && Object.keys(st.deepseek).length) {
@@ -57,12 +73,15 @@ if (st?.deepseek && Object.keys(st.deepseek).length) {
 if (st) {
   const q = st.qwen || st.qwenTokenPlan || null;
   if (q && typeof q.percentLeft === 'number') {
-    const at = q.at ? new Date(q.at) : null;
+    const at = toDate(q.at);
     const age = at ? ageMin(at) : null;
+    const resets = toDate(q.resetsAt ?? q.windows?.[0]?.resetsAt ?? null);
+    const notes = timeNotes(age);
     out.push({ provider: 'qwen-token-plan', unit: '%', remaining: q.percentLeft,
-      resetsAt: q.resetsAt ?? q.windows?.[0]?.resetsAt ?? null,
+      ...(resets ? { resetsAt: day(resets) } : {}),
       sampledAt: at?.toISOString() ?? null, ageMin: age,
-      verdict: age === null || age > STALE_MIN ? 'stale' : q.percentLeft < QWEN_LOW_PCT ? 'low' : 'ok' });
+      stale: staleOf(age), verdict: q.percentLeft < QWEN_LOW_PCT ? 'low' : staleOf(age) ? 'stale' : 'ok',
+      ...(notes.length ? { note: notes.join('; ') } : {}) });
   } else {
     out.push({ provider: 'qwen-token-plan', verdict: 'unknown', note: 'status.json has no qwen.percentLeft' });
   }
@@ -75,7 +94,8 @@ if (process.argv.includes('--json')) {
 } else {
   for (const o of out) {
     const amt = o.remaining === undefined ? '' : o.unit === '%' ? `${o.remaining}% left` : `${o.unit} ${o.remaining}`;
-    const when = o.sampledAt ? `(${o.ageMin} min ago${o.resetsAt ? `, resets ${o.resetsAt.slice(0, 10)}` : ''})` : '';
-    console.log(`${o.provider.padEnd(16)} ${o.verdict.padEnd(8)} ${amt} ${when} ${o.note ?? ''}`.trimEnd());
+    const when = o.sampledAt ? `(${o.ageMin} min ago${o.resetsAt ? `, resets ${o.resetsAt}` : ''})` : '';
+    const staleMark = o.stale && o.verdict === 'low' && o.sampledAt ? '(stale)' : ''; // low wins, but old data is still flagged after the age
+    console.log([o.provider.padEnd(16), o.verdict.padEnd(8), amt, when, staleMark, o.note ?? ''].filter(Boolean).join(' '));
   }
 }
