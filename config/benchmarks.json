@@ -1,5 +1,5 @@
 {
-  "_about": "Score table for opencode-dispatch. Scores belong to a model version, never expire, and are only added to. One entry per model: aliases = the opencode IDs that point to the same model version; scores keys = benchmark names with version (e.g. Terminal-Bench 2.1 and 2.0 are not comparable); source = vendor (vendor-reported or relayed) or independent (third-party measurement) — when a benchmark has an independent result, it wins. Category mapping is in categories. internal.<category> of each model is the internal score (from this setup's own dispatch history, computed by oc-track.mjs, weighted 2x external benchmarks); the raw track record is track.jsonl in the same folder and is not read routinely.",
+  "_about": "Curated benchmark table for opencode-dispatch. Scores belong to a model version, never expire, and are only added to. One entry per model: aliases = the opencode IDs that point to the same model version; scores keys = benchmark names with version (e.g. Terminal-Bench 2.1 and 2.0 are not comparable); source = vendor (vendor-reported or relayed) or independent (third-party measurement) — when a benchmark has an independent result, it wins. Category mapping is in categories. This file holds curated, version-controlled data only. Internal scores (this dispatch setup's own history) live in internal.json in the data folder (~/.config/opencode-dispatch or $OC_DISPATCH_HOME), derived from track.jsonl by oc-track.mjs and rebuilt from it; the raw track is not read routinely.",
   "categories": {
     "repo-coding": {
       "label": "Fix bugs / add features in an existing codebase",
@@ -105,49 +105,7 @@
           "ref": "https://arxiv.org/pdf/2609.19969"
         }
       },
-      "notes": "Independent: Vals Index 57.86 (top open-weight model), AutomationBench-AA 68.9% (Artificial Analysis).",
-      "abTest": [
-        {
-          "date": "2026-10-19",
-          "task": "Streaming-rule fix in a check.mjs script (same spec for both)",
-          "paid": {
-            "id": "deepseek/deepseek-flash",
-            "seconds": 38.7,
-            "steps": 11,
-            "inputTokens": 13319,
-            "costUSD": 0.00635,
-            "review": "passed"
-          },
-          "free": {
-            "id": "opencode/deepseek-v4.1-flash-free",
-            "seconds": 106.9,
-            "steps": 20,
-            "inputTokens": 69964,
-            "costUSD": 0,
-            "review": "passed, more thorough verification"
-          },
-          "conclusion": "No significant quality difference; the paid entry finished the real task about 2.8x faster with less exploration; probe latency (2.3s vs 2.9s) does not reflect the gap. Single sample."
-        }
-      ],
-      "internal": {
-        "repo-coding": {
-          "score": 100,
-          "n": 6,
-          "updated": "2026-10-19",
-          "speed": {
-            "opencode/deepseek-v4.1-flash-free": {
-              "ratio": 2.76,
-              "n": 1,
-              "medianSeconds": 374
-            },
-            "deepseek/deepseek-flash": {
-              "ratio": 1,
-              "n": 1,
-              "medianSeconds": 39
-            }
-          }
-        }
-      }
+      "notes": "Independent: Vals Index 57.86 (top open-weight model), AutomationBench-AA 68.9% (Artificial Analysis)."
     },
     "deepseek-v4-pro": {
       "name": "DeepSeek V4 Pro",
@@ -221,20 +179,6 @@
           "value": 86.1,
           "source": "vendor",
           "ref": "https://www.labellerr.com/blog/qwen-3-8-max-vs-kimi-k3/"
-        }
-      },
-      "internal": {
-        "reasoning": {
-          "score": 80,
-          "n": 2,
-          "updated": "2026-10-21",
-          "speed": {
-            "bailian-token-plan-personal/qwen3.8-max": {
-              "ratio": 8.120000000000001,
-              "n": 2,
-              "medianSeconds": 619
-            }
-          }
         }
       }
     },
@@ -360,20 +304,6 @@
           "source": "vendor",
           "ref": "https://www.cometapi.com/en/models/xiaomimimo/mimo-v2-6-flash"
         }
-      },
-      "internal": {
-        "repo-coding": {
-          "score": 95,
-          "n": 1,
-          "updated": "2026-10-19",
-          "speed": {
-            "opencode/mimo-v2.6-flash-free": {
-              "ratio": null,
-              "n": 0,
-              "medianSeconds": 1566
-            }
-          }
-        }
       }
     },
     "nemotron-3-ultra": {
@@ -442,20 +372,6 @@
       ],
       "scores": {},
       "notes": "Anonymous model; officially described as optimized for coding agents.",
-      "internal": {
-        "reasoning": {
-          "score": 82.5,
-          "n": 2,
-          "updated": "2026-10-21",
-          "speed": {
-            "opencode/big-pickle": {
-              "ratio": null,
-              "n": 0,
-              "medianSeconds": 502
-            }
-          }
-        }
-      },
       "stealth": true
     },
     "beam": {
@@ -465,20 +381,6 @@
         "opencode-go/beam-free"
       ],
       "scores": {},
-      "internal": {
-        "reasoning": {
-          "score": 82.5,
-          "n": 2,
-          "updated": "2026-10-21",
-          "speed": {
-            "opencode/beam-free": {
-              "ratio": 1,
-              "n": 2,
-              "medianSeconds": 79
-            }
-          }
-        }
-      },
       "stealth": true
     },
     "space-bunny": {
@@ -488,20 +390,6 @@
         "opencode-go/space-bunny"
       ],
       "scores": {},
-      "internal": {
-        "repo-coding": {
-          "score": 90,
-          "n": 1,
-          "updated": "2026-10-19",
-          "speed": {
-            "opencode/space-bunny-free": {
-              "ratio": 3.65,
-              "n": 1,
-              "medianSeconds": 837
-            }
-          }
-        }
-      },
       "stealth": true
     },
     "muse-spark-1.3": {
