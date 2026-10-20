@@ -21,6 +21,14 @@
 //            major = would break production, lose data, weaken security, or break the spec; minor = the rest
 //   scope: number of edits outside the allowed files     rerunFail: true if Claude's own test rerun failed
 //                                                          because of the model's work
+//   quality (optional, 0–100): how good the delivered output is, beyond what defects already capture — do not
+//            double-count defects. 90–100 mergeable as-is / as good as the reviewer's own work, clear, complete,
+//            idiomatic, well tested or evidenced; 75–89 good, minor polish only; 60–74 works but mediocre
+//            (verbose, shallow, weak tests or thin evidence, inconsistent with the surrounding code);
+//            40–59 meets the spec on paper but needs substantial rework; 0–39 little usable beyond the bare
+//            requirement. Meaning depends on the category: code = readability, idiom, meaningful tests;
+//            plans / reasoning / reviews = accuracy, depth, evidence; instruction tasks = fidelity to the
+//            requested format and content.
 //   remarks, reconstructed (true when rebuilt from memory/logs after the fact)
 //   taskId: same value for runs of the SAME task by different models (formal run + shadow runs, A/B) —
 //           the only fair way to compare how fast models actually finish work
@@ -33,8 +41,10 @@
 //   over probe latency when comparing speed.
 //
 // Grade (0–100, deterministic so every model is graded the same way):
-//   100 − 10 × returns − 15 × major − 5 × minor − 5 × scope − (rerunFail ? 10 : 0);
-//   'failed' or 'aborted' caps the grade at 40. Speed is NOT part of the grade (oc-rank weighs speed separately).
+//   base = 100 − 10 × returns − 15 × major − 5 × minor − 5 × scope − (rerunFail ? 10 : 0), floored at 0.
+//   With quality: grade = round(½ × base + ½ × quality); without it: grade = base (old records keep
+//   their deduction-only grade). 'failed' or 'aborted' caps the grade at 40, floor 0. Speed is NOT part of
+//   the grade (oc-rank weighs speed separately).
 // Internal score of a model in a category = mean grade of its last WINDOW records in that category.
 
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
@@ -64,7 +74,8 @@ export function grade(r) {
   const defects = r.defects || [];
   const major = defects.filter((d) => d.severity === 'major').length;
   const minor = defects.length - major;
-  let g = 100 - 10 * (r.returns || 0) - 15 * major - 5 * minor - 5 * (r.scope || 0) - (r.rerunFail ? 10 : 0);
+  const base = Math.max(0, 100 - 10 * (r.returns || 0) - 15 * major - 5 * minor - 5 * (r.scope || 0) - (r.rerunFail ? 10 : 0));
+  let g = r.quality !== undefined ? Math.round(0.5 * base + 0.5 * r.quality) : base;
   if (!passed(r)) g = Math.min(g, 40);
   return Math.max(0, g);
 }
@@ -121,6 +132,7 @@ function load() {
   if (!raw) { console.error('needs --json or --file'); process.exit(2); }
   const r = JSON.parse(raw);
   for (const f of ['date', 'task', 'category', 'model', 'result']) if (r[f] === undefined) { console.error(`missing field: ${f}`); process.exit(2); }
+  if (r.quality !== undefined && (typeof r.quality !== 'number' || !Number.isFinite(r.quality) || r.quality < 0 || r.quality > 100)) { console.error('quality must be a number 0–100'); process.exit(2); }
   if (!table.categories[r.category]) { console.error(`unknown category: ${r.category}`); process.exit(2); }
   r.modelKey = keyOf(r.model);
   if (!r.modelKey) { console.error(`model not in scores.json: ${r.model} (add an entry under models with this ID in aliases first)`); process.exit(2); }
@@ -155,7 +167,7 @@ if (cmd === 'add') {
   if (last) rs = rs.slice(-last);
   for (const r of rs) {
     const d = (r.defects || []).map((x) => `${x.severity === 'major' ? 'MAJOR' : 'minor'}: ${x.text}`).join('; ');
-    console.log(`${r.date} ${r.modelKey} [${r.category}] ${r.grade}pts ${r.result} returns:${r.returns || 0} ${r.seconds ?? '?'}s/${r.steps ?? '?'} steps${r.speedRatio !== undefined ? ` (speed x${r.speedRatio})` : ''} — ${r.task}${d ? ` | defects: ${d}` : ''}${r.reconstructed ? ' (reconstructed)' : ''}`);
+    console.log(`${r.date} ${r.modelKey} [${r.category}] ${r.grade}pts${r.quality !== undefined ? ` q:${r.quality}` : ''} ${r.result} returns:${r.returns || 0} ${r.seconds ?? '?'}s/${r.steps ?? '?'} steps${r.speedRatio !== undefined ? ` (speed x${r.speedRatio})` : ''} — ${r.task}${d ? ` | defects: ${d}` : ''}${r.reconstructed ? ' (reconstructed)' : ''}`);
   }
   if (!rs.length) console.log('no matching records');
 } else {
