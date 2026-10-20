@@ -224,27 +224,15 @@
         }
       },
       "internal": {
-        "repo-coding": {
-          "score": 83.8,
-          "n": 4,
-          "updated": "2026-10-19",
+        "reasoning": {
+          "score": 80,
+          "n": 2,
+          "updated": "2026-10-21",
           "speed": {
             "bailian-token-plan-personal/qwen3.8-max": {
-              "ratio": null,
-              "n": 0,
-              "medianSeconds": 1777
-            }
-          }
-        },
-        "instruction": {
-          "score": 95,
-          "n": 1,
-          "updated": "2026-10-19",
-          "speed": {
-            "bailian-token-plan-personal/qwen3.8-max": {
-              "ratio": null,
-              "n": 0,
-              "medianSeconds": 788
+              "ratio": 8.120000000000001,
+              "n": 2,
+              "medianSeconds": 619
             }
           }
         }
@@ -455,15 +443,15 @@
       "scores": {},
       "notes": "Anonymous model; officially described as optimized for coding agents.",
       "internal": {
-        "repo-coding": {
-          "score": 85,
-          "n": 1,
-          "updated": "2026-10-19",
+        "reasoning": {
+          "score": 82.5,
+          "n": 2,
+          "updated": "2026-10-21",
           "speed": {
             "opencode/big-pickle": {
-              "ratio": 23.79,
-              "n": 1,
-              "medianSeconds": 5445
+              "ratio": null,
+              "n": 0,
+              "medianSeconds": 502
             }
           }
         }
@@ -478,15 +466,15 @@
       ],
       "scores": {},
       "internal": {
-        "repo-coding": {
-          "score": 75,
-          "n": 1,
-          "updated": "2026-10-19",
+        "reasoning": {
+          "score": 82.5,
+          "n": 2,
+          "updated": "2026-10-21",
           "speed": {
             "opencode/beam-free": {
               "ratio": 1,
-              "n": 1,
-              "medianSeconds": 229
+              "n": 2,
+              "medianSeconds": 79
             }
           }
         }
