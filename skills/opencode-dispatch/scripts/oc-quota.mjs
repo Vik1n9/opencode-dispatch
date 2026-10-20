@@ -14,8 +14,9 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { blockedUntil, loadLimits } from './lib.mjs';
 
-const DIR = join(homedir(), 'Library', 'Application Support', 'TokenBar');
+const DIR = process.env.OC_TOKENBAR_DIR || join(homedir(), 'Library', 'Application Support', 'TokenBar');
 const APPLE_EPOCH = Date.UTC(2001, 0, 1); // Swift Date reference point (used by the ledger)
 const STALE_MIN = 60;      // older than 60 minutes = not trustworthy
 const DEEPSEEK_LOW_USD = 1; // warn below this balance
@@ -77,5 +78,17 @@ if (process.argv.includes('--json')) {
     const amt = o.remaining === undefined ? '' : o.unit === '%' ? `${o.remaining}% left` : `${o.unit} ${o.remaining}`;
     const when = o.sampledAt ? `(${o.ageMin} min ago${o.resetsAt ? `, resets ${o.resetsAt.slice(0, 10)}` : ''})` : '';
     console.log(`${o.provider.padEnd(16)} ${o.verdict.padEnd(8)} ${amt} ${when} ${o.note ?? ''}`.trimEnd());
+  }
+  // Models blocked in limits.json (written by oc-run.mjs on a rate limit / quota error). Expired entries
+  // are not shown: the model is usable again.
+  const limits = loadLimits();
+  const now = new Date();
+  for (const [id, limit] of Object.entries(limits)) {
+    if (!blockedUntil(id, now, limits)) continue;
+    if (limit.source === 'no-reset' || !limit.until) {
+      console.log(`limited  ${id}  needs owner action (${limit.message ?? ''})`);
+    } else {
+      console.log(`limited  ${id}  until ${new Date(limit.until).toLocaleString()} (${limit.source}, hits ${limit.hits ?? 1})`);
+    }
   }
 }

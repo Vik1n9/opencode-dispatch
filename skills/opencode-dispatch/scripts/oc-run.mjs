@@ -9,12 +9,18 @@
 //                   [--prompt-file <file> | <message...>]
 //
 // Prints JSON: { ok, exitCode, sessionID, title, agent, model, dir, seconds,
-//                text, tools[], steps, cost, tokens, errors[], log }
+//                text, tools[], steps, cost, tokens, errors[], log, limited? }
+//
+// When the error text looks like a rate limit / quota ("rate limit", "429", "insufficient balance" …),
+// the reset time is parsed from the message or estimated from the plan, the entry is written to
+// limits.json (so oc-rank skips the model), and `limited: { until, source, message }` is added while
+// ok stays false. A successful run without such a match clears the model's entry.
 
 import { spawn } from 'node:child_process';
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { LIMIT_RE, clearLimit, estimateReset, loadLimits, parseReset, recordLimit } from './lib.mjs';
 
 const argv = process.argv.slice(2);
 const opts = { fork: false, agent: 'build', dir: process.cwd() };
@@ -116,6 +122,24 @@ child.on('close', (code) => {
   summary.cost = Math.round(summary.cost * 1e6) / 1e6;
   if (err.trim()) summary.errors.push(`stderr: ${err.trim().slice(0, 500)}`);
   if (code === 0 && !summary.sessionID) summary.ok = false;
+  // Rate limit / quota: record when the model comes back so oc-rank skips it until then.
+  const limitText = [...summary.errors, err].join('\n');
+  if (LIMIT_RE.test(limitText)) {
+    const now = new Date();
+    const prev = loadLimits()[opts.model];
+    const prevAt = prev?.at ? new Date(prev.at).getTime() : NaN;
+    const hits = Number.isNaN(prevAt) || now.getTime() - prevAt > 24 * 3600e3 ? 1 : (Number(prev.hits) || 0) + 1;
+    const parsed = parseReset(limitText, now);
+    const est = parsed ? { until: parsed, source: 'message' } : estimateReset(opts.model, hits, now, limitText);
+    recordLimit(opts.model, { until: est.until, source: est.source, message: limitText }, now);
+    summary.limited = {
+      until: est.until ? est.until.toISOString() : null,
+      source: est.source,
+      message: limitText.trim(),
+    };
+  } else if (summary.ok) {
+    clearLimit(opts.model);
+  }
   console.log(JSON.stringify(summary, null, 2));
   process.exit(code ?? 1);
 });

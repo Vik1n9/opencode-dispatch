@@ -117,8 +117,11 @@ function speedRatios(records) {
 }
 
 function summarize(rs) {
-  const last = rs.slice(-WINDOW);
-  const quality = rs.filter((r) => typeof r.quality === 'number').slice(-WINDOW);
+  // The window follows the record date, not file order: records migrated later with old dates are not
+  // "newest". Stable sort keeps equal dates in file order; the file itself is never reordered.
+  const byDate = [...rs].sort((a, b) => String(a.date).localeCompare(String(b.date)));
+  const last = byDate.slice(-WINDOW);
+  const quality = byDate.filter((r) => typeof r.quality === 'number').slice(-WINDOW);
   const speed = {};
   for (const id of new Set(rs.map((r) => r.model))) {
     const sr = rs.filter((r) => r.model === id && r.speedRatio !== undefined);

@@ -125,3 +125,26 @@ test('recompute: rebuilds internal.json from scratch and keeps show in the new f
   const shown = run(trackScript, ['show'], home);
   assert.match(shown.stdout, /85pts c:100 q:70 passed/);
 });
+
+test('recompute: the 10-record window follows date order, not file order', (t) => {
+  const home = tempHome();
+  writeBenchmarks(home, benchTable());
+  // Ten October records (grade 50 with quality 0), then a January record migrated later (grade 100).
+  // By file order the old record would be the newest; by date it is outside the window.
+  const october = Array.from({ length: 10 }, (_, i) => record({
+    date: `2026-10-${String(i + 1).padStart(2, '0')}`, quality: 0,
+  }));
+  const migrated = record({ date: '2025-01-01', quality: 100 });
+  seedTrack(home, [...october, migrated]);
+
+  const r = run(trackScript, ['recompute'], home);
+  assert.equal(r.code, 0, r.out);
+  const i = readInternal(home).models.alpha['repo-coding'];
+  assert.equal(i.score, 50, 'the migrated old record must not count as newest');
+  assert.equal(i.quality, 0);
+  assert.equal(i.n, 11);
+  assert.equal(i.updated, '2026-10-10');
+
+  const lines = trackRecords(home);
+  assert.equal(lines.at(-1).date, '2025-01-01', 'the file line order is untouched');
+});

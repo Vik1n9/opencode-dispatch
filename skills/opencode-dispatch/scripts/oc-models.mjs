@@ -12,28 +12,48 @@
 // training). All models on the official Go live list (https://opencode.ai/zen/go/v1/models) are listed, priced
 // from the Go docs table (https://opencode.ai/docs/go/); usage counts toward the Go monthly allowance. --no-go skips.
 //
-// Usage: node oc-models.mjs [--probe] [--no-go] [--concurrency 6] [--timeout 120] [--json]
-//                           [--cache <file>] [--only <model-id>]
-//   --cache <file>  write the inventory (with probe results) to a session cache file; later dispatches in the
-//                   same session read it via oc-rank.mjs instead of re-running this script
+// Usage: node oc-models.mjs [--probe] [--probe-all] [--no-go] [--concurrency 6] [--timeout 120] [--json]
+//                           [--cache <file>] [--max-age <hours>] [--force] [--only <model-id>]
+//   --cache <file>  write the inventory (with probe results); default $OC_DISPATCH_CACHE or
+//                   ~/.cache/opencode-dispatch/inventory.json, and that default is always written
+//   --max-age <h>   with --probe: reuse a cache younger than this (default 6 h) instead of probing
+//   --force         with --probe: probe even when the cache is fresh
+//   --probe-all     probe every model, not just the ones the benchmark table knows plus official Zen free
 //   --only <id>     probe just this model and merge the result into --cache (use when a cached model fails
 //                   at dispatch time)
 
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { CACHE, loadBenchmarks, probeTargets } from './lib.mjs';
 
 const argv = process.argv.slice(2);
 const has = (f) => argv.includes(f);
 const val = (f, d) => { const i = argv.indexOf(f); return i >= 0 && argv[i + 1] ? argv[i + 1] : d; };
 const concurrency = Number(val('--concurrency', 6));
 const timeoutS = Number(val('--timeout', 120));
+const maxAgeH = Number(val('--max-age', 6));
+const cachePath = val('--cache', CACHE);
+const only = val('--only', null);
 const ZEN_DOCS = 'https://opencode.ai/docs/zen/';
 const ZEN_LIVE = 'https://opencode.ai/zen/v1/models';
 const GO_DOCS = 'https://opencode.ai/docs/go/';
 const GO_LIVE = 'https://opencode.ai/zen/go/v1/models';
 const HOSTED = new Set(['opencode', 'opencode-go']); // OpenCode's own (Zen / Go): official information wins
+
+/* ---------- Fresh cache: skip probing before any network call ---------- */
+if (has('--probe') && !only && !has('--force') && existsSync(cachePath)) {
+  try {
+    const cache = JSON.parse(readFileSync(cachePath, 'utf8'));
+    const refreshed = Date.parse(cache.updated || cache.created || '');
+    const ageH = (Date.now() - refreshed) / 36e5;
+    if (cache.probed && Number.isFinite(ageH) && ageH >= 0 && ageH < maxAgeH) {
+      console.log(`inventory cache is fresh (${ageH.toFixed(1)}h, ${cache.models?.length ?? 0} models) — skipped; use --force to re-probe`);
+      process.exit(0);
+    }
+  } catch { /* unreadable cache: rebuild it */ }
+}
 
 const dir = mkdtempSync(join(tmpdir(), 'oc-models-'));
 const oc = (args) => spawnSync('opencode', args, { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, PWD: dir } }).stdout || '';
@@ -96,7 +116,6 @@ for (const m of official) {
   if (l) { m.context = l.limit?.context ?? null; m.image = (l.capabilities?.input || []).includes('image'); }
 }
 let models = [...official, ...keyed].sort((a, b) => String(a.id).localeCompare(String(b.id)));
-const only = val('--only', null);
 if (only) models = models.filter((m) => m.id === only);
 
 /* ---------- 4. Local probe ---------- */
@@ -126,8 +145,19 @@ async function probeOne(m) {
   });
 }
 if (has('--probe')) {
+  // Probing costs one model session each: by default only models that can be ranked (in benchmarks.json)
+  // plus official Zen free models nobody has benchmarked yet. --probe-all restores the old behaviour.
+  let table = { models: {} };
+  try { table = loadBenchmarks(); } catch { /* benchmarks.json not installed: official free models only */ }
+  const targets = new Set(probeTargets(models, table).map((m) => m.id));
+  const probeAll = has('--probe-all');
+  const queue = models.filter((m) => m.id && (probeAll || only || targets.has(m.id)));
+  if (!probeAll && !only) {
+    for (const m of models) {
+      if (m.id && !targets.has(m.id)) m.probe = { ok: false, skipped: true, error: 'not probed (not in benchmarks.json)' };
+    }
+  }
   writeFileSync(join(dir, 'n.txt'), '42\n');
-  const queue = models.filter((m) => m.id);
   await Promise.all(Array.from({ length: Math.max(1, concurrency) }, async () => {
     for (let m = queue.shift(); m; m = queue.shift()) m.probe = await probeOne(m);
   }));
@@ -139,20 +169,19 @@ if (has('--probe')) {
 }
 rmSync(dir, { recursive: true, force: true });
 
-/* ---------- Write the session cache ---------- */
-const cachePath = val('--cache', null);
-if (cachePath) {
-  let cache = { created: new Date().toISOString(), officialError, models: [] };
-  if (only && existsSync(cachePath)) {
-    try { cache = JSON.parse(readFileSync(cachePath, 'utf8')); } catch { /* broken file: rebuild */ }
-    cache.models = cache.models.filter((m) => m.id !== only).concat(models);
-    cache.updated = new Date().toISOString();
-  } else {
-    cache.models = models;
-    cache.probed = has('--probe');
-  }
-  writeFileSync(cachePath, JSON.stringify(cache, null, 2));
+/* ---------- Write the inventory cache (the default path is always written) ---------- */
+mkdirSync(dirname(cachePath), { recursive: true });
+let cache = { created: new Date().toISOString(), officialError, models: [] };
+if (only && existsSync(cachePath)) {
+  try { cache = JSON.parse(readFileSync(cachePath, 'utf8')); } catch { /* broken file: rebuild */ }
+  cache.models = (cache.models || []).filter((m) => m.id !== only).concat(models);
+  cache.updated = new Date().toISOString();
+  if (has('--probe')) cache.probed = true;
+} else {
+  cache.models = models;
+  cache.probed = has('--probe');
 }
+writeFileSync(cachePath, JSON.stringify(cache, null, 2));
 
 /* ---------- Output ---------- */
 // Zen / Go models in the local catalog but not in the official lists: retired or no longer free — do not dispatch
@@ -162,7 +191,9 @@ if (has('--json')) {
   console.log(JSON.stringify({ officialError, models, notOfficialFreeButLocal: retired }, null, 2));
 } else {
   if (officialError) console.log(`!! cannot read official information (${officialError}) — do not dispatch from the local catalog alone`);
+  const skipped = [];
   for (const m of models) {
+    if (m.probe?.skipped) { skipped.push(m.id); continue; }
     const tag = m.source.startsWith('official')
       ? `${m.source}${m.live === false ? '(not on live list)' : ''}${m.contributor ? '[data used for training]' : ''}`
       : 'local -> check vendor docs';
@@ -170,6 +201,7 @@ if (has('--json')) {
     console.log([String(m.id ?? `(${m.name}: no official ID)`).padEnd(46), m.cost.padEnd(12), tag.padEnd(22),
       m.context ? `${Math.round(m.context / 1000)}k`.padStart(6) : '     ?', m.image ? 'img' : '   ', p].join('  '));
   }
+  if (skipped.length) console.log(`\nnot probed (not in benchmarks.json): ${skipped.join(', ')}`);
   if (retired.length) console.log(`\nIn the local catalog but not in the official lists (retired or no longer free — do not dispatch): ${retired.join(', ')}`);
   console.log('\nGo usage counts toward the Go plan\'s monthly allowance (prices show how fast it is used up, not extra charges); [data used for training] marks Contributor models.');
 }

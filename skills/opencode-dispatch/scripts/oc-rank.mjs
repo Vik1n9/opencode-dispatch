@@ -34,13 +34,11 @@
 // One entry per model (the cheapest plan). Models the official live list no longer has are skipped.
 
 import { existsSync, readFileSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { join } from 'node:path';
-import { blockedUntil, loadBenchmarks, loadInternal, loadLimits, plan } from './lib.mjs';
+import { CACHE, blockedUntil, loadBenchmarks, loadInternal, loadLimits, plan } from './lib.mjs';
 
 const argv = process.argv.slice(2);
 const val = (f, d) => { const i = argv.indexOf(f); return i >= 0 && argv[i + 1] ? argv[i + 1] : d; };
-const cachePath = val('--cache', process.env.OC_DISPATCH_CACHE || join(homedir(), '.cache', 'opencode-dispatch', 'inventory.json'));
+const cachePath = val('--cache', CACHE);
 const task = val('--task', null);
 if (!task) {
   console.error('usage: oc-rank.mjs --task <category|all> [--cache <file>] [--min-context <tokens>] [--json]');
@@ -70,7 +68,7 @@ const PLAN_LABEL = { token: 'Qwen token plan', free: 'Zen free', go: 'Go plan', 
 const minContext = Number(val('--min-context', 0));
 const now = new Date();
 const blocked = Object.entries(limits)
-  .map(([id, limit]) => ({ id, limit, until: blockedUntil(id, now) }))
+  .map(([id, limit]) => ({ id, limit, until: blockedUntil(id, now, limits) }))
   .filter((x) => x.until);
 const blockedIds = new Set(blocked.map((x) => x.id));
 const blockedLines = blocked.map(({ id, limit, until }) => limit.source === 'no-reset'
