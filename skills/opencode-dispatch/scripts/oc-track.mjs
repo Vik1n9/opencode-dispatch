@@ -11,8 +11,13 @@
 // Usage:
 //   node oc-track.mjs add --file <record.json> | --json '<record>'   append one record, rebuild internal scores
 //   node oc-track.mjs recompute                                       rebuild internal.json from track.jsonl
-//   node oc-track.mjs show [--model <key|alias>] [--category <c>] [--last N]   compact one line per record
+//   node oc-track.mjs show [--model <key|alias>] [--category <c>] [--task-id <id>] [--last N]   one line per record
+//   node oc-track.mjs compare --task-id <id>                          side by side: every run of one task
 //   node oc-track.mjs grade --json '<record>'                         print the grade only (dry run)
+//
+// compare columns (file order): model entry id, result (first word), grade, correctness, quality, seconds,
+//   steps, speedRatio, returns, defects (<major>M/<minor>m); '–' = no quality / no speed ratio. Last line: the
+//   fastest passing run (comparable, not limited) and the highest-grade run (not limited; first one on ties).
 //
 // Record fields (Claude fills these in after reviewing the work):
 //   date, project, task, category (a benchmarks.json category), model (the entry ID actually used),
@@ -211,8 +216,9 @@ if (cmd === 'add') {
   const mk = val('--model', null) && keyOf(val('--model'), table);
   if (val('--model', null) && !mk) { console.error(`model not in benchmarks.json: ${val('--model')}`); process.exit(2); }
   const cat = val('--category', null);
+  const tid = val('--task-id', null);
   const last = Number(val('--last', 0));
-  let rs = readTrack().filter((r) => (!mk || r.modelKey === mk) && (!cat || r.category === cat));
+  let rs = readTrack().filter((r) => (!mk || r.modelKey === mk) && (!cat || r.category === cat) && (!tid || r.taskId === tid));
   if (last) rs = rs.slice(-last);
   for (const r of rs) {
     const d = (r.defects || []).map((x) => `${x.severity === 'major' ? 'MAJOR' : 'minor'}: ${x.text}`).join('; ');
@@ -221,7 +227,28 @@ if (cmd === 'add') {
     console.log(`${r.date} ${r.modelKey} [${r.category}] ${g}pts c:${c}${r.quality !== undefined ? ` q:${r.quality}` : ''} ${r.result} returns:${r.returns || 0} ${r.seconds ?? '?'}s/${r.steps ?? '?'} steps${r.speedRatio !== undefined ? ` (speed x${r.speedRatio})` : ''} — ${r.task}${d ? ` | defects: ${d}` : ''}${r.reconstructed ? ' (reconstructed)' : ''}`);
   }
   if (!rs.length) console.log('no matching records');
+} else if (cmd === 'compare') {
+  const tid = val('--task-id', null);
+  if (!tid) { console.error('usage: oc-track.mjs compare --task-id <id>'); process.exit(2); }
+  const rs = readTrack().filter((r) => r.taskId === tid);
+  if (!rs.length) { console.error(`no records for taskId ${tid}`); process.exit(1); }
+  for (const r of rs) { r.correctness ??= correctness(r); r.grade ??= grade(r); }
+  const rows = rs.map((r) => {
+    const major = (r.defects || []).filter((d) => d.severity === 'major').length;
+    return [r.model, (r.result || '?').split(/[\s,]+/)[0], `${r.grade}pts`, `c:${r.correctness}`,
+      r.quality !== undefined ? `q:${r.quality}` : '–', `${r.seconds ?? '?'}s`, `${r.steps ?? '?'} steps`,
+      r.speedRatio !== undefined ? `x${r.speedRatio}` : '–', `returns:${r.returns || 0}`,
+      `${major}M/${(r.defects || []).length - major}m`];
+  });
+  const widths = rows[0].map((_, i) => Math.max(...rows.map((row) => row[i].length)));
+  console.log(`${tid} — ${rs[0].task}`);
+  for (const row of rows) console.log(row.map((c, i) => c.padEnd(widths[i])).join('  ').trimEnd());
+  const counted = rs.filter((r) => !isLimited(r));
+  const fast = counted.filter((r) => passed(r) && r.seconds && r.speedComparable !== false)
+    .reduce((b, r) => (!b || r.seconds < b.seconds ? r : b), null);
+  const best = counted.reduce((b, r) => (!b || r.grade > b.grade ? r : b), null);
+  console.log(`fastest passing: ${fast ? `${fast.model} (${fast.seconds}s)` : 'none'} · highest grade: ${best ? `${best.model} (${best.grade}pts)` : 'none'}`);
 } else {
-  console.error('usage: oc-track.mjs add|grade|recompute|show … (see the file header)');
+  console.error('usage: oc-track.mjs add|grade|recompute|show|compare … (see the file header)');
   process.exit(2);
 }
