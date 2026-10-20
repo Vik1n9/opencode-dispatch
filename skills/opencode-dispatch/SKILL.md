@@ -7,7 +7,7 @@ description: Dispatch work to other models (DeepSeek, Qwen, GLM, Kimi, etc.) thr
 
 Claude is the manager, opencode the worker. Claude cuts tasks, writes specs, picks models, reviews, merges, and keeps anything that needs overall judgment, credentials or external operations; every implementation that can be written as a standalone, verifiable spec is dispatched (user, 2026-10-19). Every call goes through `scripts/oc-run.mjs` — never `opencode run` directly (it hangs on open stdin, takes the project from `$PWD`, and falls back to an unpredictable default model).
 
-**Do it yourself instead** when the spec would be about as long as the change (one small file, a few dozen lines): measured 2026-10-21, such a task cost Claude 23 % more tokens through the skill than directly (spec + review ≈ the code itself). Dispatch pays off for multi-file work, long test-fix loops, parallel tasks, or when the user wants Claude's allowance saved over wall time. If the user explicitly asks to dispatch, dispatch.
+**Do it yourself instead** when the spec would be about as long as the change. Measured 2026-10-21 (Claude cost via skill ÷ direct): ~30-line change 1.23×, ~200 lines over 2 files 0.96× — break-even around there; larger or parallel work saves more, and review caught a bug the direct run shipped. Dispatching is 60–80 % slower. If the user asks to dispatch, dispatch.
 
 ## Scripts and data
 
@@ -20,13 +20,14 @@ Scripts: `node ~/.agents/skills/opencode-dispatch/scripts/<name>`. Each file hea
 | `oc-quota.mjs` | DeepSeek balance, Qwen token plan (TokenBar), active limit blocks |
 | `oc-run.mjs --model <id> --dir <dir> --title <t> "<task>"` | One run → JSON summary (`ok`, `sessionID`, `seconds`, `steps`, `tokens`, `cost`, `errors`, `limited`, `log`); `--session`, `--fork`, `--agent plan`, `--prompt-file`. Never read the log whole |
 | `oc-track.mjs add --json '<record>'` | Record a reviewed run; also `show`, `compare --task-id`, `recompute`, `grade` |
+| `oc-bench.mjs lint` | Check `benchmarks.json`; `add-model`, `add-alias`, `set-score` edit it safely |
 
 Data `~/.config/opencode-dispatch/` (`$OC_DISPATCH_HOME` for sandboxes): `benchmarks.json` (curated, linked to the repo), `track.jsonl` (history, not read routinely), `internal.json` (derived, never edit), `limits.json`. Cache `~/.cache/opencode-dispatch/inventory.json` (`$OC_DISPATCH_CACHE`).
 
 ## Workflow
 
 1. **Inventory**: `oc-models.mjs --probe`. Official lists are the truth; the local catalog lags. Plans: Zen — only models marked Free; Go — subscribed, counts against its allowance; Contributor models train on data; free / Contributor terms cover ordinary code only. `API key has expired` → the user makes a key in the OpenCode Console and runs `opencode auth login` (never enter keys).
-2. **Rank**: `oc-rank.mjs --task <category>`. Models missing from `benchmarks.json` are listed last; add them (benchmark name with version, `source` vendor / independent, `ref`, all IDs in `aliases`; none found → `stealth: true`) when one is a plausible pick or the user asks — not on every start.
+2. **Rank**: `oc-rank.mjs --task <category>`. Models missing from `benchmarks.json` are listed last; add them with `oc-bench.mjs` (benchmark name with version, independent beats vendor; none found → `--stealth`) when one is a plausible pick or the user asks — not on every start.
 3. **Allowance**: `oc-quota.mjs`. DeepSeek `low` (< $1) or Qwen `low` (< 10 %) → next model in the ranking; Qwen `unknown` → ask the user to glance at TokenBar before sending a lot, note "Qwen allowance not confirmed"; data older than 60 min is `stale` — use it, mention it. Zen free needs no check but is rate-limited.
 4. **Cut the task**: one task does one thing. opencode cannot see this conversation: give the background, allowed / forbidden files, definition of done (tests, one commit), what the report must contain. Long specs via `--prompt-file`. Every spec carries the Safety lines below.
 5. **Dispatch** in a branch or worktree. Long tasks: Bash `run_in_background: true`, wrapped as `(trap '' INT; node oc-run.mjs …)`; you are notified — do not poll. Parallel runs each get their own `--dir`; never two `build` runs on the same files. Progress: tail of the log, `git log` in the worktree.
