@@ -67,4 +67,4 @@ Three dimensions: **correctness** (deductions for returns, major / minor defects
 - **Sensitive content never goes to a model under data-collection terms** (user, 2026-10-21): personal, customer, non-public business or financial data, or anything called confidential → only models the official Zen / Go privacy tables list as no training and 0-day retention (check each session — they change); if none fits, ask first.
 - Never put secrets in task descriptions (opencode stores sessions and sends them to providers). `~/.config/opencode/opencode.json` holds API keys in plain text — filter key / token / secret fields when reading it.
 
-`opencode session list -n 20 --format json` (run in the project folder), `opencode session export <id>`, `opencode service status` (web UI address, for when the user wants to watch).
+Also: `opencode session list -n 20 --format json` (in the project), `opencode session export <id>`, `opencode service status` (web UI to watch).
