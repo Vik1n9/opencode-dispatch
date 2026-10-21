@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-// Rank models for one kind of task, from the session inventory cache + the persistent score table.
-// No probing, no network: run oc-models.mjs --probe --cache <file> once per session, then call this
-// for every dispatch decision.
+// Rank models for one kind of task, from the session inventory cache + the curated benchmark table + the
+// derived internal scores. No probing, no network: run oc-models.mjs --probe --cache <file> once per session,
+// then call this for every dispatch decision.
 //
 // Usage: node oc-rank.mjs --cache <file> --task <category|all> [--min-context <tokens>] [--scores <file>] [--json]
 //                        [--no-free]
@@ -13,6 +13,8 @@
 //                  paused (text says so, JSON shadow is empty and noFree is true); notInTable is filtered too
 //   categories are defined in the score table (repo-coding, terminal, greenfield, tools, gui-vision,
 //   reasoning, security, instruction, long-context)
+//   models blocked in limits.json (rate limit / quota, future until or source "no-reset") are excluded from
+//   ranking and shadow candidates, and listed one per line
 //
 // Exit codes: 2 (one lower-case line on stderr) when --cache/--task are missing, --min-context is invalid, or
 //   <cache>/<scores> cannot be read, cannot be parsed, or lack their expected shape (models array; models + categories).
@@ -25,13 +27,14 @@
 //      (not transitive across differing shared benchmarks), the best primary-benchmark score in the cycle leads.
 //      gap ≤ 5 same, ≤ 10 close, > 10 clearly weaker
 //   2. within 10 points, a Qwen token-plan model wins (token plan beats speed — user's call); best score first
-//   3. otherwise, among models within 5 points (same capability), the fastest (within 30% counts as equal
-//      speed; then free > Go > pay-as-you-go). Speed = task-completion speed (internal.<cat>.speed, same
-//      taskId compared) when every candidate has it, else probe latency
+//   3. otherwise, among models within 5 points (same capability), the fastest by task-completion speed
+//      (internal.<cat>.speed, same taskId compared; within 30% counts as equal, then free > Go > pay-as-you-go)
+//      when every candidate has it. Without it, probe latency is one noisy sample (entries of the same model
+//      swap order between probes), so the plan decides: free > Go > pay-as-you-go, latency only breaks ties
 //   4. pay-as-you-go is used only when no free / Go model is within 10 points — even when the paid entry is
 //      faster (user: free first whenever the gap is small); rule 3 is re-applied to the free / Go models
 //
-// Also lists shadow-run candidates: usable models marked stealth in the score table, and models the table
+// Also lists shadow-run candidates: usable models marked stealth in benchmarks.json, and models the table
 // does not know yet (fill the table first — only models without any public benchmark get stealth: true).
 // JSON: shadow holds only the stealth entries, notInTable the unknown ones. One entry per model (the cheapest
 // plan). Models the official live list no longer has are skipped.
@@ -45,7 +48,7 @@ import { due, paused } from './oc-limits.mjs';
 
 const argv = process.argv.slice(2);
 const val = (f, d) => { const i = argv.indexOf(f); return i >= 0 && argv[i + 1] ? argv[i + 1] : d; };
-const cachePath = val('--cache', null);
+const cachePath = val('--cache', CACHE);
 const task = val('--task', null);
 const scoresPath = val('--scores', join(homedir(), '.config', 'opencode-dispatch', 'scores.json'));
 const noFree = argv.includes('--no-free');
@@ -104,7 +107,7 @@ const usable = cache.models.filter((m) => {
 });
 const COST = { token: 0, free: 1, go: 2, paid: 3 };
 
-// Internal score (internal[category] of each model in scores.json, computed by oc-track.mjs from the track record) weighs
+// Internal score (internal.json → models.<key>.<category>, computed by oc-track.mjs from the track record) weighs
 // INTERNAL_WEIGHT times the external benchmarks: the mean gap on shared benchmarks counts once, the internal gap
 // INTERNAL_WEIGHT times, and the weighted mean is the gap. With an internal score on one side only, compare external only;
 // with no shared external benchmark, compare internal only (anonymous models rely on this).
@@ -116,9 +119,10 @@ function rankCategory(cat) {
     const entry = byAlias.get(m.id);
     const scores = {};
     for (const [b, s] of Object.entries(entry?.scores || {})) if (benches.has(b)) scores[b] = s.value;
+    const internal = entry?.key ? internalTable.models?.[entry.key]?.[cat] ?? null : null;
     return { id: m.id, model: entry?.name ?? m.name ?? m.id, key: entry?.key ?? null, plan: plan(m.id),
-      seconds: m.probe?.seconds ?? null, scores, sources: entry?.scores || {}, internal: entry?.internal?.[cat] ?? null,
-      taskSpeed: entry?.internal?.[cat]?.speed?.[m.id]?.ratio ?? null };
+      seconds: m.probe?.seconds ?? null, scores, sources: entry?.scores || {}, internal,
+      taskSpeed: internal?.speed?.[m.id]?.ratio ?? null };
   });
   const scored = rows.filter((r) => Object.keys(r.scores).length || r.internal);
   const diff = (a, b) => {
@@ -167,19 +171,18 @@ function rankCategory(cat) {
   if (cycle) trail.push(`gaps are not transitive among ${cycle.map((r) => r.id).join(', ')}; leader chosen by ${primary ?? 'no primary benchmark'}`);
   let pick = leader;
   if (pick) {
-    trail.push(`strongest: ${leader.model} (${leader.id}, ${primary && leader.scores[primary] !== undefined ? `${primary} ${leader.scores[primary]}` : 'no primary external benchmark'}${leader.internal ? `, internal score ${leader.internal.score} (${leader.internal.n} records)` : ''})`);
+    trail.push(`strongest: ${leader.model} (${leader.id}, ${primary && leader.scores[primary] !== undefined ? `${primary} ${leader.scores[primary]}` : 'no primary external benchmark'}${leader.internal ? `, internal score ${leader.internal.score} (c ${leader.internal.correctness} / q ${leader.internal.quality ?? '–'}, ${leader.internal.n} records)` : ''})`);
     const within = (x, lim) => x.gap !== null && x.gap <= lim;
-    // Rule 3: the fastest candidate (within 30% counts as equally fast; then free > Go > pay-as-you-go).
-    // Speed: task speed (completion-time ratio on the same task, oc-track.mjs) when every candidate has it; response latency
-    // does not predict completion speed, so it is only the fallback
+    // Rule 3: with task speed for every candidate, the fastest (within 30% counts as equally fast; then free > Go >
+    // pay-as-you-go). Without it the plan decides — probe latency is too noisy to rank by — and latency breaks ties
     const quickest = (cands) => {
       const byTask = cands.length > 1 && cands.every((x) => x.taskSpeed !== null);
       const sp = (x) => (byTask ? x.taskSpeed : x.seconds) ?? 1e9;
       const fastest = Math.min(...cands.map(sp));
-      const quick = cands.filter((x) => sp(x) <= fastest * SPEED_EQUAL).sort((a, b) => (COST[a.plan] - COST[b.plan]) || (sp(a) - sp(b)));
-      const how = cands.length < 2 ? '' : byTask ? 'speed compared by measured task speed' : fastest < 1e9 ? 'speed compared by response latency (some candidates lack task speed; latency does not predict completion speed)' : 'no speed data; chosen by plan';
+      const quick = (byTask ? cands.filter((x) => sp(x) <= fastest * SPEED_EQUAL) : cands).sort((a, b) => (COST[a.plan] - COST[b.plan]) || (sp(a) - sp(b)));
+      const how = cands.length < 2 ? '' : byTask ? 'speed compared by measured task speed' : 'some candidates lack task speed; chosen by plan (free first), latency only breaks ties';
       const speed = (x) => byTask ? `task speed x${x.taskSpeed}` : x.seconds !== null ? `${x.seconds}s` : 'latency not probed';
-      return { pick: quick[0], tie: quick.length > 1, how, speed };
+      return { pick: quick[0], tie: quick.length > 1, how, speed, byTask };
     };
     // Rule 2 (user's call: token plan beats speed): a token-plan model within 10 points wins; best score first, equal
     // gaps resolved by the same speed rule as rule 3 (task speed when every tied candidate has it, else latency)
@@ -192,7 +195,7 @@ function rankCategory(cat) {
     } else {
       const q = quickest(scored.filter((x) => within(x, SAME)));
       if (q.how) trail.push(`same capability (gap <= ${SAME}): ${q.how}`);
-      if (q.pick !== leader) trail.push(`fastest with same capability${q.tie ? ' (similar speed: cheaper plan)' : ''} -> ${q.pick.id} (${q.speed(q.pick)})`);
+      if (q.pick !== leader) trail.push(`${q.byTask ? `fastest with same capability${q.tie ? ' (similar speed: cheaper plan)' : ''}` : 'cheapest plan with same capability'} -> ${q.pick.id} (${q.speed(q.pick)})`);
       pick = q.pick;
       // Rule 4: pay-as-you-go only when no free / Go model is within 10 points; otherwise re-apply rule 3 among them (within 5 first, then 10)
       if (pick.plan === 'paid') {
@@ -214,7 +217,7 @@ const cats = task === 'all' ? Object.keys(table.categories) : [task];
 for (const c of cats) if (!table.categories[c]) { console.error(`unknown task category: ${c}`); process.exit(2); }
 const results = cats.map(rankCategory);
 
-// Shadow-run candidates (SKILL.md "Shadow runs"): usable anonymous models — marked stealth in scores.json — plus models the
+// Shadow-run candidates (SKILL.md "Shadow runs"): usable anonymous models — marked stealth in benchmarks.json — plus models the
 // table does not have yet (fill the table first; only models without external benchmarks get stealth). One entry per model,
 // the cheapest plan (free > Go > pay-as-you-go), so a model never shadow-runs twice. Only the stealth entries are shadow
 // candidates (JSON `shadow`); a model the table does not know yet is not anonymous until it is added and marked, so it is
@@ -233,10 +236,13 @@ const listed = [...shadowMap.values()];
 const shadow = noFree ? [] : listed.filter((m) => m.known);
 const notInTable = listed.filter((m) => !m.known);
 
+if (stale) console.error(`!! inventory cache is ${Math.floor(ageHours)}h old — re-run oc-models.mjs --probe`);
+
 if (argv.includes('--json')) {
   const pausedJson = pausedList.map(([id, e]) => ({ id, hitAt: e.hitAt, nextProbe: e.nextProbe, due: dueSet.has(id) }));
   console.log(JSON.stringify({ cache: { created: cache.created, probed: cache.probed }, ...(noFree ? { noFree: true } : {}), results, ...(pausedJson.length ? { paused: pausedJson } : {}), shadow, notInTable, droppedUnknownContext: droppedUnknown }, null, 2));
 } else {
+  for (const line of blockedLines) console.log(line);
   if (!cache.probed) console.log('!! the cache has no probe results (built without --probe); availability not confirmed');
   for (const r of results) {
     console.log(`\n## ${r.label} (${r.category})`);
@@ -246,7 +252,8 @@ if (argv.includes('--json')) {
     for (const x of r.ranking) {
       const gap = x.gap === null ? 'no shared' : x.gap === 0 ? 'leader' : `gap ${x.gap.toFixed(1)}`;
       const sc = Object.entries(x.scores).map(([b, v]) => `${b} ${v}${x.sources[b]?.source === 'vendor' ? '*' : ''}`).join(', ');
-      console.log(`  ${x.id.padEnd(44)} ${gap.padEnd(10)} ${PLAN_LABEL[x.plan].padEnd(14)} ${x.seconds === null ? '   ?' : String(x.seconds).padStart(5) + 's'}  ${x.internal ? `internal ${x.internal.score} (${x.internal.n})${sc ? ', ' : ''}` : ''}${sc}${x.taskSpeed !== null ? `  task speed x${x.taskSpeed}` : ''}`);
+      const int = x.internal ? `internal ${x.internal.score} (c ${x.internal.correctness} / q ${x.internal.quality ?? '–'}, ${x.internal.n})${sc ? ', ' : ''}` : '';
+      console.log(`  ${x.id.padEnd(44)} ${gap.padEnd(10)} ${PLAN_LABEL[x.plan].padEnd(14)} ${x.seconds === null ? '   ?' : String(x.seconds).padStart(5) + 's'}  ${int}${sc}${x.taskSpeed !== null ? `  task speed x${x.taskSpeed}` : ''}`);
     }
     if (r.unscored.length) console.log(`  no scores in this category (needs a trial to compare): ${r.unscored.join(', ')}`);
   }

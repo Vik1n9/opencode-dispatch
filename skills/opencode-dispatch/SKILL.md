@@ -6,7 +6,7 @@ allowed-tools: Bash(node ${CLAUDE_SKILL_DIR}/scripts/oc-check.mjs)
 
 # opencode dispatch (CLI mode)
 
-Claude Code is the dispatcher; opencode is the worker. Every call goes through `scripts/oc-run.mjs` — never run `opencode run` directly in Bash.
+Claude is the manager, opencode the worker. Claude cuts tasks, writes specs, picks models, reviews, merges, and keeps anything that needs overall judgment, credentials or external operations; every implementation that can be written as a standalone, verifiable spec is dispatched. Every call goes through `scripts/oc-run.mjs` — never `opencode run` directly (it hangs on open stdin, takes the project from `$PWD`, and falls back to an unpredictable default model).
 
 ## Environment check (runs when the skill loads)
 
@@ -18,22 +18,11 @@ If that line does not start with `ok` (including when it shows the command itsel
 
 ## Why the wrapper script is mandatory
 
-Pitfalls found in practice (opencode 2.0.32), all handled by the script:
+## Scripts and data
 
-- **It hangs forever if stdin stays open**: outside a terminal, `opencode run` waits for stdin to end. The script uses `stdio: ignore`; when running by hand always add `< /dev/null`.
-- **The working directory comes from `$PWD`**, not the process cwd: setting only one of `cd` / cwd lands in the wrong project. The script's `--dir` sets both cwd and `PWD`.
-- **Without a model it uses opencode's own default**, which is unpredictable. The script requires `--model`.
-- **Raw output is line-by-line JSON events**, long and noisy. The script saves it to a file and prints a compact summary.
+Scripts: `node ~/.agents/skills/opencode-dispatch/scripts/<name>`. Each file header documents its options and formats — read it only when you need a detail. `--version` on any script prints the installed version.
 
-## Usage
-
-```bash
-node ~/.agents/skills/opencode-dispatch/scripts/oc-run.mjs \
-  --model <provider/model> --agent <build|plan> --dir <work folder> \
-  --title <recognizable title> "<task description>"
-```
-
-| Option | Meaning |
+| Script | Does |
 |---|---|
 | `--model` | Required. `opencode models` lists what is available; format `provider/model` |
 | `--agent` | Only `build` (default; edits files, runs shell) or `plan` (no edits — see the safety rules); any other value is rejected |
@@ -48,17 +37,24 @@ Unknown options are rejected (exit 2), and `--` ends the options — everything 
 
 The output is a JSON summary: `ok`, `exitCode`, `sessionID`, `seconds` (elapsed), `text` (last reply), `tools` (tools used, with argument summaries), `steps`, `cost`, `tokens` (`input` / `output` / `reasoning`), `errors`, `log`, plus `title`, `agent`, `model`, `dir`. Read the `log` file only for details, and never read the whole log into the conversation.
 
-## Choosing a model: score table + session cache
+## Workflow
 
-opencode's free models change often, and anonymous (stealth) models appear from time to time. **The skill keeps no model list**; the work is split across these files:
+1. **Inventory**: `oc-models.mjs --probe`. Official lists are the truth; the local catalog lags. Plans: Zen — only models marked Free; Go — subscribed, counts against its allowance; Contributor models train on data; free / Contributor terms cover ordinary code only. `API key has expired` → the user makes a key in the OpenCode Console and runs `opencode auth login` (never enter keys).
+2. **Rank**: `oc-rank.mjs --task <category>`. Models missing from `benchmarks.json` are listed last; add them with `oc-bench.mjs` (benchmark name with version, independent beats vendor; none found → `--stealth`) when one is a plausible pick or the user asks — not on every start.
+3. **Allowance**: `oc-quota.mjs`. DeepSeek `low` (< $1) or Qwen `low` (< 10 %) → next model in the ranking; Qwen `unknown` → ask the user to glance at TokenBar before sending a lot, note "Qwen allowance not confirmed"; data older than 60 min is `stale` — use it, mention it. Zen free needs no check but is rate-limited.
+4. **Cut the task**: one task does one thing. opencode cannot see this conversation: give the background, allowed / forbidden files, definition of done (tests, one commit), what the report must contain. Long specs via `--prompt-file`. Every spec carries the Safety lines below.
+5. **Dispatch** in a branch or worktree. Long tasks: Bash `run_in_background: true`, wrapped as `(trap '' INT; node oc-run.mjs …)`; you are notified — do not poll. Parallel runs each get their own `--dir`; never two `build` runs on the same files. Progress: tail of the log, `git log` in the worktree.
+6. **Review** every report as a claim, not evidence: `git diff` yourself (scope creep, forbidden files, loosened tests), run the tests yourself, tick off the definition of done, check that live data and the main checkout are untouched.
+7. **Return** what falls short to the same `--session`: file:line, why, direction, this round's done. Claude does not fix it for the model; it takes over only if the user asks or several returns fail — and says why.
+8. **Record** every reviewed run (formal and shadow) with `oc-track.mjs add`, then **wrap up**: rounds, problems and fixes, returns and why, model, `oc-rank` reasoning, total `cost`. Ask before merging, pushing or deploying.
 
-| Data | Location | Contents | Lifetime |
-|---|---|---|---|
-| **Score table** | `~/.config/opencode-dispatch/scores.json` | External benchmark scores per model version (with source: vendor-reported or independent), the **internal score** (`internal.<category>`: score, count, per-entry task speed), and which benchmarks belong to which task category | Scores belong to a model version and **never expire**; only added to |
-| **Track record** | `~/.config/opencode-dispatch/track.jsonl` | One line per dispatch: task, time, review result, returns, defects, grade | Append only. **Not read routinely** (saves context); query with `oc-track.mjs show` only when judging how a model did on this kind of task before |
-| **Inventory cache** | This session's scratchpad: `<scratchpad>/oc-inventory.json` | Which models are usable right now, probe latency, context length, plan | **Valid only within the same session** |
+## Allocation rules (implemented in `oc-rank.mjs`)
 
-### Workflow
+Defaults, not hard rules: a model the user names is used without re-arguing (mention once if clearly unsuitable — context, `low` allowance, much weaker). Borderline cases (gap ≈ 5 / 10, speed ≈ 30 %) may follow the task's nature; explain in the report.
+- Capability first, per category, on shared benchmarks (same name and version); independent results beat vendor-reported ones. Gap ≤ 5 same, ≤ 10 close, > 10 clearly weaker. Internal score weighs 2× external.
+- A Qwen token-plan model within 10 points wins (token plan beats speed).
+- Otherwise, among models within 5: if every candidate has measured task speed, the fastest (within 30 % = equal, then free > Go > pay-as-you-go); if not, probe latency is too noisy to rank by — free first, then Go, then pay-as-you-go, unless the user names a model.
+- Free before paid when within 10 (paid only on request). Pay-as-you-go only when no free / Go model is within 10. Never a clearly weaker model because of its plan.
 
 1. **Take inventory once, the first time you dispatch in a session** (never again in that session):
    `node ~/.agents/skills/opencode-dispatch/scripts/oc-models.mjs --probe --cache <scratchpad>/oc-inventory.json`
@@ -80,9 +76,9 @@ opencode's free models change often, and anonymous (stealth) models appear from 
    - Zen free models need no allowance check, but they are rate-limited; too much parallelism gets blocked.
 5. **A model fails at dispatch time** (cannot be called, expired key): re-probe just that one and update the cache — `oc-models.mjs --probe --cache <scratchpad>/oc-inventory.json --only <model ID>` — then rank again. No full re-inventory. `--only` needs an existing cache from a full run and an ID in the official lists or the local catalog; anything else exits 2 and leaves the cache untouched.
 
-### Allocation rules (set by the user on 2026-10-19; implemented by `oc-rank.mjs`)
+Every usable `stealth` model `oc-rank` lists runs the formal task alongside (same spec, same `taskId`) when: context fits; isolated from the same base (own worktree, branch, port); no external effects and done verifiable locally; not a small read-only query. Otherwise say which failed. Same review, record, never merge (better than formal → ask about switching); delete the worktree, keep the branch. `oc-track.mjs compare --task-id <id>` shows runs side by side.
 
-**These are defaults, not hard rules.** If the user names a model (for example the paid entry when in a hurry), use it without re-applying the rules or asking back; only mention it once if the model is clearly unsuitable (context too small, allowance `low`, clearly weaker on benchmarks), and the user's decision stands. Without a named model, follow the rules below; borderline cases (gap right around 5 / 10 points, speed difference around 30%) may be judged by the nature of the task — explain the reasoning in the report.
+## Grading (`oc-track.mjs` header has the full field list)
 
 - **Capability first, compared per category**: decide which category the task belongs to and compare only that category's benchmarks. The primary benchmark is the one in that category that the most usable models have; the top scorer on it leads. Every other model is compared with the leader by the mean difference on **shared benchmarks** (same name and version). Discount vendor-reported numbers; an independent result wins when one exists.
 - **Gap definitions**: ≤5 points = same capability; 5–10 points = close; >10 points = clearly weaker (pick the stronger one). Mixed wins and losses count as close.
@@ -112,9 +108,12 @@ opencode's free models change often, and anonymous (stealth) models appear from 
 - In parallel dispatch, a provider may limit concurrent connections; when you hit it, spread work across providers.
 - When reporting an allocation, include: task category, the model used, `oc-rank.mjs`'s reasoning, and the cost (`cost`).
 
-## Dispatch mode: subagent loop (user's choice)
+## Usage limits and resuming
 
-opencode is the subagent, Claude is the manager. **Split tasks and dispatch them to opencode first; Claude does only what cannot be split off** (user, 2026-10-19): Claude cuts tasks, writes specs, picks models, reviews and merges, and handles parts that need overall judgment or involve credentials / external operations; any implementation that can be written as a standalone, verifiable spec is dispatched. **Dispatch → monitor → review → return with directions → repeat until the result meets the goal.** Claude does not fix the code for it; problems go back to the same session as concrete directions so the model fixes them itself. Claude takes over only when the user asks, or after several returns still fail — and tells the user why.
+`oc-run` detects rate-limit / quota errors: summary `limited: { until, source, message }`, model blocked in `limits.json` until then (`oc-rank` skips it; success clears it). `until` is parsed from the error (Retry-After, "try again in …", reset time) or estimated by consecutive hits: Zen free 15 min → 1 h → 5 h; Go 1 h → 5 h → 24 h (Go: 20 % of the monthly limit per 5 h, 50 % per week); Qwen from TokenBar; pay-as-you-go without balance = `no-reset` (ask the user to top up). On `limited`, keep the worktree as is, then:
+- `until` within ~20 min: wait (background `sleep` or the loop's wakeup), continue the same `--session`, same model.
+- Later: rank again, continue the **same `--session` with `--model <next>`** (context carries over): "the previous model hit a usage limit; continue from the existing changes, do not start over".
+- Record the cut-off run `result: "limited"` (not scored), the finisher with `handoffFrom` and `speedComparable: false`. Shadow runs that hit a limit: record `limited`, do not switch.
 
 **On by default** (user, 2026-10-19): once this skill is loaded and the environment check passed, dispatch mode stays on for every later task in the session — dispatch implementation work without being asked again — until the user explicitly says to stop dispatching / turn it off. Turning it off lasts until the user turns it back on.
 

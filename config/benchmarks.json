@@ -1,5 +1,5 @@
 {
-  "_about": "Score table for opencode-dispatch. Scores belong to a model version, never expire, and are only added to. One entry per model: aliases = the opencode IDs that point to the same model version; scores keys = benchmark names with version (e.g. Terminal-Bench 2.1 and 2.0 are not comparable); source = vendor (vendor-reported or relayed) or independent (third-party measurement) — when a benchmark has an independent result, it wins. Category mapping is in categories. internal.<category> of each model is the internal score (from this setup's own dispatch history, computed by oc-track.mjs, weighted 2x external benchmarks); the raw track record is track.jsonl in the same folder and is not read routinely.",
+  "_about": "Curated benchmark table for opencode-dispatch. Scores belong to a model version, never expire, and are only added to. One entry per model: aliases = the opencode IDs that point to the same model version; scores keys = benchmark names with version (e.g. Terminal-Bench 2.1 and 2.0 are not comparable); source = vendor (vendor-reported or relayed) or independent (third-party measurement) — when a benchmark has an independent result, it wins. Category mapping is in categories. This file holds curated, version-controlled data only. Internal scores (this dispatch setup's own history) live in internal.json in the data folder (~/.config/opencode-dispatch or $OC_DISPATCH_HOME), derived from track.jsonl by oc-track.mjs and rebuilt from it; the raw track is not read routinely.",
   "categories": {
     "repo-coding": {
       "label": "Fix bugs / add features in an existing codebase",
@@ -376,20 +376,6 @@
           "value": 26,
           "source": "vendor",
           "ref": "https://www.cometapi.com/en/models/xiaomimimo/mimo-v2-6-flash"
-        }
-      },
-      "internal": {
-        "repo-coding": {
-          "score": 95,
-          "n": 1,
-          "updated": "2026-10-19",
-          "speed": {
-            "opencode/mimo-v2.6-flash-free": {
-              "ratio": null,
-              "n": 0,
-              "medianSeconds": 1566
-            }
-          }
         }
       }
     },

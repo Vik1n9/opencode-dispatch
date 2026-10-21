@@ -73,6 +73,19 @@ if (only && cachePath) {
   }
 }
 
+/* ---------- Fresh cache: skip probing before any network call ---------- */
+if (has('--probe') && !only && !has('--force') && existsSync(cachePath)) {
+  try {
+    const cache = JSON.parse(readFileSync(cachePath, 'utf8'));
+    const refreshed = Date.parse(cache.updated || cache.created || '');
+    const ageH = (Date.now() - refreshed) / 36e5;
+    if (cache.probed && Number.isFinite(ageH) && ageH >= 0 && ageH < maxAgeH) {
+      console.log(`inventory cache is fresh (${ageH.toFixed(1)}h, ${cache.models?.length ?? 0} models) — skipped; use --force to re-probe`);
+      process.exit(0);
+    }
+  } catch { /* unreadable cache: rebuild it */ }
+}
+
 const dir = mkdtempSync(join(tmpdir(), 'oc-models-'));
 // 60 s: a hung background service must not block the inventory forever; failures surface as warnings.
 const oc = (args) => {
@@ -245,6 +258,18 @@ async function probeOne(m) {
   });
 }
 if (has('--probe')) {
+  // Probing costs one model session each: by default only models that can be ranked (in benchmarks.json)
+  // plus official Zen free models nobody has benchmarked yet. --probe-all restores the old behaviour.
+  let table = { models: {} };
+  try { table = loadBenchmarks(); } catch { /* benchmarks.json not installed: official free models only */ }
+  const targets = new Set(probeTargets(models, table).map((m) => m.id));
+  const probeAll = has('--probe-all');
+  const queue = models.filter((m) => m.id && (probeAll || only || targets.has(m.id)));
+  if (!probeAll && !only) {
+    for (const m of models) {
+      if (m.id && !targets.has(m.id)) m.probe = { ok: false, skipped: true, error: 'not probed (not in benchmarks.json)' };
+    }
+  }
   writeFileSync(join(dir, 'n.txt'), '42\n');
   const queue = models.filter((m) => m.id);
   await Promise.all(Array.from({ length: concurrency }, async () => {
@@ -275,6 +300,7 @@ if (cachePath) {
   mkdirSync(dirname(cachePath), { recursive: true });
   writeFileSync(cachePath, JSON.stringify(cache, null, 2));
 }
+writeFileSync(cachePath, JSON.stringify(cache, null, 2));
 
 /* ---------- Output ---------- */
 for (const w of warnings) console.error(`warning: ${w}`);
@@ -285,7 +311,9 @@ if (has('--json')) {
   console.log(JSON.stringify({ officialError, warnings, models, notOfficialFreeButLocal: retired }, null, 2));
 } else {
   if (officialError) console.log(`!! cannot read official information (${officialError}) — do not dispatch from the local catalog alone`);
+  const skipped = [];
   for (const m of models) {
+    if (m.probe?.skipped) { skipped.push(m.id); continue; }
     const tag = m.source.startsWith('official')
       ? `${m.source}${m.live === false ? '(not on live list)' : ''}${m.contributor ? '[data used for training]' : ''}`
       : 'local -> check vendor docs';
@@ -293,6 +321,7 @@ if (has('--json')) {
     console.log([String(m.id ?? `(${m.name}: no official ID)`).padEnd(46), m.cost.padEnd(12), tag.padEnd(22),
       m.context ? `${Math.round(m.context / 1000)}k`.padStart(6) : '     ?', m.image ? 'img' : '   ', p].join('  '));
   }
+  if (skipped.length) console.log(`\nnot probed (not in benchmarks.json): ${skipped.join(', ')}`);
   if (retired.length) console.log(`\nIn the local catalog but not in the official lists (retired or no longer free — do not dispatch): ${retired.join(', ')}`);
   console.log('\nGo usage counts toward the Go plan\'s monthly allowance (prices show how fast it is used up, not extra charges); [data used for training] marks Contributor models.');
 }
