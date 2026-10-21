@@ -4,8 +4,9 @@ A [Claude Code](https://claude.com/claude-code) skill that turns Claude into a d
 
 ## What it does
 
-- **Safe wrapper around `opencode run`** (`oc-run.mjs`): closes stdin (opencode hangs otherwise), sets `PWD` so the right project is used, requires an explicit model, streams the raw JSONL to a log, and prints a compact JSON summary.
-- **Official-first model inventory** (`oc-models.mjs`): reads the OpenCode Zen / Go docs and live model lists, adds API-key providers from the local catalog, and probes the models that can actually be ranked. The inventory is cached in `~/.cache/opencode-dispatch/` and reused for 12 hours, so most sessions start without probing.
+- **Local-only environment check** (`oc-check.mjs`): verifies this is the local machine (no cloud session / container), opencode 2.x is installed, and at least one provider is logged in; the dispatch scripts and `install.sh` run it first.
+- **Safe wrapper around `opencode run`** (`oc-run.mjs`): closes stdin (opencode hangs otherwise), sets `PWD` so the right project is used, requires an explicit model, streams the raw JSONL to a log, and prints a compact JSON summary. opencode runs in its own process group, so a SIGINT to the caller never kills the run; sending SIGTERM to the wrapper stops it cleanly.
+- **Official-first model inventory** (`oc-models.mjs`): reads the OpenCode Zen / Go docs and live model lists, adds API-key providers from the local catalog, and optionally probes every model on this machine. Results are cached per session.
 - **Capability-first ranking** (`oc-rank.mjs`): compares models only on the benchmarks of the task's category (repo coding, terminal, greenfield, tools, GUI / vision, reasoning, security, instruction following, long context), blends in an internal score from your own dispatch history, then applies plan and speed rules (flat-rate token plan first, free before paid, pay-as-you-go only when nothing close is cheaper).
 - **Benchmark table upkeep** (`oc-bench.mjs`): `lint` checks `benchmarks.json`; `add-model`, `add-alias`, `set-score` edit it and refuse any change that would break the lint rules.
 - **Track record and internal score** (`oc-track.mjs`): every reviewed dispatch is scored on three dimensions — correctness (returns, major / minor defects, scope violations, failed test reruns), output quality (the reviewer's 0–100 rating), and completion speed (compared across models that ran the same task; `compare --task-id` shows them side by side). Internal scores are derived from the raw history only, so they can always be rebuilt.
@@ -29,9 +30,13 @@ Personal data stays out of the repository, in `~/.config/opencode-dispatch/` (ov
 ## Requirements
 
 - Node.js 18+ (scripts use only built-in modules)
-- opencode CLI (tested with 2.0.32), with the providers you want to use already authenticated
+- **opencode CLI 2.x only** (tested with 2.0.32), **logged in** (`opencode auth login`) for the providers you want to use. `oc-run.mjs` and `oc-models.mjs` run `scripts/oc-check.mjs` and refuse to start unless it prints `ok`; `install.sh` stops only in a cloud session / container or on a wrong opencode major version, and only warns (still linking everything) when opencode is missing or no provider is logged in. Check by hand with `node skills/opencode-dispatch/scripts/oc-check.mjs`
 - Claude Code (or another agent that loads skills from `~/.agents/skills` / `~/.claude/skills`)
 - Optional: TokenBar, for `oc-quota.mjs`
+
+## Local machine only
+
+The skill refuses to run in Claude Code cloud sessions, containers / devcontainers / Codespaces, and on machines where opencode is missing, not 2.x, or not logged in (`scripts/oc-check.mjs`; `oc-run.mjs` and `oc-models.mjs` repeat the check, and `install.sh` stops or warns). Cloud and Cowork sessions do not read `~/.claude/skills`, so the skill is not loaded there as long as you do not enable it for your claude.ai account and do not copy it into a repository's `.claude/skills/`. Once the skill is loaded and the environment check passes, dispatch mode is on by default until you ask Claude to stop.
 
 ## Install
 
@@ -41,17 +46,7 @@ cd opencode-dispatch
 ./install.sh
 ```
 
-`install.sh` symlinks `skills/opencode-dispatch` into `~/.agents/skills/` (and `~/.claude/skills/` if missing) and `config/benchmarks.json` into `~/.config/opencode-dispatch/`. Anything already in the way (including a pre-v2 `scores.json`) is moved to `~/.config/opencode-dispatch/backups/<timestamp>/`. Dispatching never writes to the repository.
-
-## Version
-
-The version lives in [`skills/opencode-dispatch/VERSION`](skills/opencode-dispatch/VERSION) (semantic versioning, starting at 1.0.0). Because the installed skill is a symlink to this checkout, any script tells you what runs locally:
-
-```bash
-node ~/.agents/skills/opencode-dispatch/scripts/oc-run.mjs --version   # opencode-dispatch 1.0.0
-```
-
-Bump it in the same commit as the change and tag the release `vX.Y.Z`: patch for fixes, minor for new features or rule changes, major when a data file format (`benchmarks.json`, `track.jsonl`, `internal.json`, `limits.json`) changes incompatibly.
+`install.sh` first runs `scripts/oc-check.mjs`: in a cloud session / container or on opencode other than 2.x it stops (exit 1) before linking anything; a missing opencode or no logged-in provider only prints a warning and the install continues. It then symlinks `skills/opencode-dispatch` into `~/.agents/skills/` (and `~/.claude/skills/` if missing) and `config/scores.json` into `~/.config/opencode-dispatch/`. Anything already in the way is moved to `~/.config/opencode-dispatch/backups/<timestamp>/`. Because the score table is a symlink, internal scores written by `oc-track.mjs` show up as changes in this repository.
 
 ## Quick start
 
@@ -65,6 +60,10 @@ node $D/oc-track.mjs add --json '<review record>'
 ```
 
 In practice you just ask Claude Code to "dispatch this to opencode" and the skill drives these steps.
+
+## Tests
+
+`node --test tests/` runs the test suite: no network, no real opencode (fake shims on `PATH`), and a temp `HOME`, so nothing touches your real config or score table.
 
 ## Notes
 

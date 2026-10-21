@@ -9,11 +9,16 @@
 //   limits.json       rate-limit / quota state written by another script (only oc-rank reads it)
 //
 // Usage:
-//   node oc-track.mjs add --file <record.json> | --json '<record>'   append one record, rebuild internal scores
-//   node oc-track.mjs recompute                                       rebuild internal.json from track.jsonl
-//   node oc-track.mjs show [--model <key|alias>] [--category <c>] [--task-id <id>] [--last N]   one line per record
-//   node oc-track.mjs compare --task-id <id>                          side by side: every run of one task
-//   node oc-track.mjs grade --json '<record>'                         print the grade only (dry run)
+//   node oc-track.mjs add --file <record.json> | --json '<record>'   append one record, recompute internal score
+//   node oc-track.mjs recompute                                       rebuild every internal score from track.jsonl
+//   node oc-track.mjs show [--model <key|alias>] [--category <c>] [--last N]   compact one line per record
+//   node oc-track.mjs grade --json '<record>' | --file <record.json>   print the grade only (dry run)
+//
+// Errors (unreadable score table, bad record, unparseable track line) print one line to stderr and exit 2.
+// Records passed to add / grade are validated (defects shape, result prefix, non-negative counters); recompute
+// and show accept every record already in track.jsonl. add / recompute rewrite track.jsonl, so they refuse to
+// run (nothing written) when any line is not valid JSON; show skips such lines with a warning. Files are written
+// via a temp file next to the real target and renamed over it, so a symlinked scores.json stays a symlink.
 //
 // compare columns (file order): model entry id, result (first word), grade, correctness, quality, seconds,
 //   steps, speedRatio, returns, defects (<major>M/<minor>m); '–' = no quality / no speed ratio. Last line: the
@@ -68,10 +73,9 @@
 //   n           = record count          updated = newest record's date
 //   speed       = { <entry id>: { ratio, n, medianSeconds } } as above
 
-import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
-import { exitIfVersion, INTERNAL, TRACK, keyOf, loadBenchmarks } from './lib.mjs';
-
-exitIfVersion();
+import { existsSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 
 const WINDOW = 10;
 
@@ -79,13 +83,56 @@ const argv = process.argv.slice(2);
 const cmd = argv[0];
 const val = (f, d) => { const i = argv.indexOf(f); return i >= 0 && argv[i + 1] ? argv[i + 1] : d; };
 
-const table = loadBenchmarks();
-const readTrack = () => existsSync(TRACK)
-  ? readFileSync(TRACK, 'utf8').split('\n').filter((l) => l.trim()).map((l) => JSON.parse(l))
-  : [];
+let table;
+try {
+  table = JSON.parse(readFileSync(SCORES, 'utf8'));
+} catch (e) {
+  console.error(`cannot read the score table ${SCORES}: ${e.code === 'ENOENT' ? 'file not found' : e.message}`);
+  process.exit(2);
+}
+const keyOf = (idOrKey) => {
+  if (table.models[idOrKey]) return idOrKey;
+  for (const [k, m] of Object.entries(table.models)) if ((m.aliases || []).includes(idOrKey)) return k;
+  return null;
+};
 
-export function correctness(r) {
-  const defects = r.defects || [];
+// Write through a temp file in the target's real directory, then rename over the real path, so an
+// interruption cannot leave a truncated file and a symlinked scores.json is updated in place.
+function writeAtomic(path, text) {
+  let real = path;
+  try { real = realpathSync(path); } catch { /* target does not exist yet: create it here */ }
+  const tmp = `${real}.tmp-${process.pid}`;
+  try {
+    writeFileSync(tmp, text);
+    renameSync(tmp, real);
+  } catch (e) {
+    try { unlinkSync(tmp); } catch { /* already gone */ }
+    console.error(`cannot write ${real}: ${e.message}`);
+    process.exit(2);
+  }
+}
+
+// strict = the caller rewrites the whole file, so a bad line must stop it instead of being dropped.
+const readTrack = ({ strict = false } = {}) => {
+  if (!existsSync(TRACK)) return [];
+  const records = [];
+  readFileSync(TRACK, 'utf8').split('\n').forEach((line, i) => {
+    if (!line.trim()) return;
+    try {
+      records.push(JSON.parse(line));
+    } catch {
+      if (strict) {
+        console.error(`track.jsonl line ${i + 1} is not valid JSON; fix or remove it first`);
+        process.exit(2);
+      }
+      console.error(`track.jsonl line ${i + 1} is not valid JSON; skipped`);
+    }
+  });
+  return records;
+};
+
+export function grade(r) {
+  const defects = Array.isArray(r.defects) ? r.defects : [];
   const major = defects.filter((d) => d.severity === 'major').length;
   const minor = defects.length - major;
   const base = Math.max(0, 100 - 10 * (r.returns || 0) - 15 * major - 5 * minor - 5 * (r.scope || 0) - (r.rerunFail ? 10 : 0));
@@ -141,79 +188,64 @@ function summarize(rs) {
       };
     }
   }
-  return {
-    score: mean1(last.map((r) => r.grade)),
-    correctness: mean1(last.map((r) => r.correctness)),
-    quality: mean1(quality.map((r) => r.quality)),
-    qn: quality.length,
-    n: rs.length,
-    updated: rs.reduce((mx, r) => (r.date > mx ? r.date : mx), rs[0].date),
-    speed,
-  };
+  writeAtomic(SCORES, JSON.stringify(table, null, 2) + '\n');
 }
 
-function buildInternal(records) {
-  const grouped = {};
-  for (const r of records) {
-    if (isLimited(r) || !r.modelKey) continue; // limited: in the track, out of every aggregate
-    const cats = (grouped[r.modelKey] ||= {});
-    (cats[r.category] ||= []).push(r);
-  }
-  const models = {};
-  for (const [key, cats] of Object.entries(grouped)) {
-    models[key] = {};
-    for (const [cat, rs] of Object.entries(cats)) models[key][cat] = summarize(rs);
-  }
-  return models;
-}
-
-// Rebuild internal.json (and the derived fields on every track line) from track.jsonl, from scratch.
-function rebuild() {
-  const records = readTrack();
-  for (const r of records) {
-    r.modelKey = keyOf(r.model, table) ?? r.modelKey;
-    r.correctness = correctness(r);
-    r.grade = grade(r);
-  }
-  speedRatios(records);
-  writeFileSync(TRACK, records.map((r) => JSON.stringify(r)).join('\n') + (records.length ? '\n' : ''));
-  const models = buildInternal(records);
-  writeFileSync(INTERNAL, JSON.stringify({ generated: new Date().toISOString(), models }, null, 2) + '\n');
-  return { records, models };
-}
+const RESULT_OK = /^(passed|passed-after-return|failed|aborted)(,|$)/;
+const RESULT_LEGACY = /^(一次通過|退回後通過|未通過|中止)/;
 
 function load() {
-  const raw = val('--json', null) ?? (val('--file', null) && readFileSync(val('--file'), 'utf8'));
-  if (!raw) { console.error('needs --json or --file'); process.exit(2); }
-  const r = JSON.parse(raw);
+  const file = val('--file', null);
+  let raw = val('--json', null);
+  if (raw === null && file !== null) {
+    try { raw = readFileSync(file, 'utf8'); } catch (e) { console.error(`cannot read ${file}: ${e.code === 'ENOENT' ? 'file not found' : e.message}`); process.exit(2); }
+  }
+  if (raw === null) { console.error('needs --json or --file'); process.exit(2); }
+  let r;
+  try { r = JSON.parse(raw); } catch { console.error('invalid JSON in the record'); process.exit(2); }
+  if (!r || typeof r !== 'object' || Array.isArray(r)) { console.error('invalid record: not a JSON object'); process.exit(2); }
   for (const f of ['date', 'task', 'category', 'model', 'result']) if (r[f] === undefined) { console.error(`missing field: ${f}`); process.exit(2); }
   if (r.quality !== undefined && (typeof r.quality !== 'number' || !Number.isFinite(r.quality) || r.quality < 0 || r.quality > 100)) { console.error('quality must be a number 0–100'); process.exit(2); }
   if (!table.categories[r.category]) { console.error(`unknown category: ${r.category}`); process.exit(2); }
-  r.modelKey = keyOf(r.model, table);
-  if (!r.modelKey) { console.error(`model not in benchmarks.json: ${r.model} (add an entry under models with this ID in aliases first)`); process.exit(2); }
-  r.correctness = correctness(r);
+  if (r.defects !== undefined) {
+    const why = !Array.isArray(r.defects) ? 'must be an array of { severity, text } objects'
+      : r.defects.find((d) => !d || typeof d !== 'object' || !['major', 'minor'].includes(d.severity) || typeof d.text !== 'string');
+    if (why) {
+      const detail = typeof why === 'object' ? `bad defect ${JSON.stringify(why)} (severity must be major or minor, text a string)` : why;
+      console.error(`invalid defects: ${detail}`);
+      process.exit(2);
+    }
+  }
+  if (typeof r.result !== 'string' || !(RESULT_OK.test(r.result) || RESULT_LEGACY.test(r.result))) {
+    console.error(`invalid result: ${r.result}`);
+    process.exit(2);
+  }
+  for (const f of ['returns', 'scope']) if (r[f] !== undefined && !(Number.isInteger(r[f]) && r[f] >= 0)) { console.error(`invalid ${f}: ${r[f]}`); process.exit(2); }
+  for (const f of ['seconds', 'steps', 'inputTokens']) if (r[f] !== undefined && !(typeof r[f] === 'number' && Number.isFinite(r[f]) && r[f] >= 0)) { console.error(`invalid ${f}: ${r[f]}`); process.exit(2); }
+  r.modelKey = keyOf(r.model);
+  if (!r.modelKey) { console.error(`model not in scores.json: ${r.model} (add an entry under models with this ID in aliases first)`); process.exit(2); }
   r.grade = grade(r);
   return r;
 }
 
 if (cmd === 'add') {
   const r = load();
-  appendFileSync(TRACK, JSON.stringify(r) + '\n');
-  // Speed ratios span models: rebuild everything so other runs of the same taskId are updated too.
-  const { models } = rebuild();
-  const i = models[r.modelKey]?.[r.category];
-  const q = r.quality !== undefined ? `, quality ${r.quality}` : '';
-  if (isLimited(r) || !i) {
-    console.log(`recorded: ${r.modelKey} / ${r.category} graded ${r.grade} (correctness ${r.correctness}${q}) — limited, not counted${r.handoffFrom ? ` (handed off from ${r.handoffFrom})` : ''}`);
-  } else {
-    const sp = i.speed?.[r.model];
-    console.log(`recorded: ${r.modelKey} / ${r.category} graded ${r.grade} (correctness ${r.correctness}${q}) -> internal score ${i.score} (${i.n} records)${sp?.ratio ? `, task speed x${sp.ratio} (${sp.n} comparisons)` : ''}`);
-  }
+  const all = readTrack({ strict: true });
+  all.push(r);
+  recompute(all); // speed ratios span models: other models with the same taskId must be updated too
+  writeAtomic(TRACK, all.map((x) => JSON.stringify(x)).join('\n') + '\n');
+  const i = table.models[r.modelKey].internal[r.category];
+  const sp = i.speed?.[r.model];
+  console.log(`recorded: ${r.modelKey} / ${r.category} graded ${r.grade} -> internal score ${i.score} (${i.n} records)${sp?.ratio ? `, task speed x${sp.ratio} (${sp.n} comparisons)` : ''}`);
 } else if (cmd === 'grade') {
   console.log(load().grade);
 } else if (cmd === 'recompute') {
-  const { records } = rebuild();
-  console.log(`recomputed ${records.length} records`);
+  const rs = readTrack({ strict: true });
+  for (const r of rs) { r.modelKey = keyOf(r.model) ?? r.modelKey; r.grade = grade(r); }
+  for (const m of Object.values(table.models)) delete m.internal;
+  recompute(rs);
+  writeAtomic(TRACK, rs.map((r) => JSON.stringify(r)).join('\n') + (rs.length ? '\n' : ''));
+  console.log(`recomputed ${rs.length} records`);
 } else if (cmd === 'show') {
   const mk = val('--model', null) && keyOf(val('--model'), table);
   if (val('--model', null) && !mk) { console.error(`model not in benchmarks.json: ${val('--model')}`); process.exit(2); }
@@ -223,10 +255,8 @@ if (cmd === 'add') {
   let rs = readTrack().filter((r) => (!mk || r.modelKey === mk) && (!cat || r.category === cat) && (!tid || r.taskId === tid));
   if (last) rs = rs.slice(-last);
   for (const r of rs) {
-    const d = (r.defects || []).map((x) => `${x.severity === 'major' ? 'MAJOR' : 'minor'}: ${x.text}`).join('; ');
-    const c = r.correctness ?? correctness(r);
-    const g = r.grade ?? grade(r);
-    console.log(`${r.date} ${r.modelKey} [${r.category}] ${g}pts c:${c}${r.quality !== undefined ? ` q:${r.quality}` : ''} ${r.result} returns:${r.returns || 0} ${r.seconds ?? '?'}s/${r.steps ?? '?'} steps${r.speedRatio !== undefined ? ` (speed x${r.speedRatio})` : ''} — ${r.task}${d ? ` | defects: ${d}` : ''}${r.reconstructed ? ' (reconstructed)' : ''}`);
+    const d = (Array.isArray(r.defects) ? r.defects : []).map((x) => `${x.severity === 'major' ? 'MAJOR' : 'minor'}: ${x.text}`).join('; ');
+    console.log(`${r.date} ${r.modelKey} [${r.category}] ${r.grade}pts ${r.result} returns:${r.returns || 0} ${r.seconds ?? '?'}s/${r.steps ?? '?'} steps${r.speedRatio !== undefined ? ` (speed x${r.speedRatio})` : ''} — ${r.task}${d ? ` | defects: ${d}` : ''}${r.reconstructed ? ' (reconstructed)' : ''}`);
   }
   if (!rs.length) console.log('no matching records');
 } else if (cmd === 'compare') {

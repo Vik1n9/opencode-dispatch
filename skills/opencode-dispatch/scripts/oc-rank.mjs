@@ -3,24 +3,28 @@
 // derived internal scores. No probing, no network: run oc-models.mjs --probe --cache <file> once per session,
 // then call this for every dispatch decision.
 //
-// Data folder: $OC_DISPATCH_HOME, else ~/.config/opencode-dispatch (benchmarks.json and internal.json are
-// read from there; see lib.mjs). internal.json is derived from track.jsonl by oc-track.mjs and holds the
-// dispatch history scores; benchmarks.json holds the curated external benchmarks.
-//
-// Usage: node oc-rank.mjs --task <category|all> [--cache <file>] [--min-context <tokens>] [--json]
-//   --cache        session inventory written by oc-models.mjs; default $OC_DISPATCH_CACHE or
-//                  ~/.cache/opencode-dispatch/inventory.json. Missing -> exit 2; older than 12 hours -> warn.
-//   --min-context  drop entries whose context window is smaller (e.g. continuing a long session: 400000)
-//   categories are defined in benchmarks.json (repo-coding, terminal, greenfield, tools, gui-vision,
+// Usage: node oc-rank.mjs --cache <file> --task <category|all> [--min-context <tokens>] [--scores <file>] [--json]
+//                        [--no-free]
+//   --min-context  drop entries whose context window is smaller (e.g. continuing a long session: 400000); must be a
+//                  finite number >= 0. A usable model whose context is unknown is dropped too, but reported
+//                  (text: one "dropped (context unknown, --min-context N)" line; JSON: droppedUnknownContext)
+//   --no-free      drop every Zen free entry (plan free, ids starting opencode/) before ranking, for while the free
+//                  usage limit lasts: only token plan / Go / pay-as-you-go entries are ranked; shadow runs are
+//                  paused (text says so, JSON shadow is empty and noFree is true); notInTable is filtered too
+//   categories are defined in the score table (repo-coding, terminal, greenfield, tools, gui-vision,
 //   reasoning, security, instruction, long-context)
 //   models blocked in limits.json (rate limit / quota, future until or source "no-reset") are excluded from
 //   ranking and shadow candidates, and listed one per line
 //
+// Exit codes: 2 (one lower-case line on stderr) when --cache/--task are missing, --min-context is invalid, or
+//   <cache>/<scores> cannot be read, cannot be parsed, or lack their expected shape (models array; models + categories).
+//
 // Allocation rules (user, 2026-10-19; SKILL.md "Allocation rules"), applied in order:
 //   1. capability first — compare only the benchmarks of this task's category, on benchmarks both
 //      models have (same name and version); gap = (mean external diff + INTERNAL_WEIGHT × internal diff)
-//      / (1 + INTERNAL_WEIGHT). Internal score = graded dispatch history (oc-track.mjs, internal.json).
-//      Leader = best on the primary benchmark, replaced by anyone the blended gap says is stronger.
+//      / (1 + INTERNAL_WEIGHT). Internal score = graded dispatch history (oc-track.mjs). Leader = best on
+//      the primary benchmark, replaced by anyone the blended gap says is stronger; when those gaps cycle
+//      (not transitive across differing shared benchmarks), the best primary-benchmark score in the cycle leads.
 //      gap ≤ 5 same, ≤ 10 close, > 10 clearly weaker
 //   2. within 10 points, a Qwen token-plan model wins (token plan beats speed — user's call); best score first
 //   3. otherwise, among models within 5 points (same capability), the fastest by task-completion speed
@@ -32,53 +36,75 @@
 //
 // Also lists shadow-run candidates: usable models marked stealth in benchmarks.json, and models the table
 // does not know yet (fill the table first — only models without any public benchmark get stealth: true).
-// One entry per model (the cheapest plan). Models the official live list no longer has are skipped.
+// JSON: shadow holds only the stealth entries, notInTable the unknown ones. One entry per model (the cheapest
+// plan). Models the official live list no longer has are skipped.
+// Models paused in limits.json (oc-limits.mjs) are dropped from ranking and shadow runs until a probe or a
+// normal run on that id succeeds; text lists them, JSON adds paused.
 
-import { existsSync, readFileSync } from 'node:fs';
-import { exitIfVersion, CACHE, CACHE_MAX_AGE_H, blockedUntil, loadBenchmarks, loadInternal, loadLimits, plan } from './lib.mjs';
-
-exitIfVersion();
+import { readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+import { due, paused } from './oc-limits.mjs';
 
 const argv = process.argv.slice(2);
 const val = (f, d) => { const i = argv.indexOf(f); return i >= 0 && argv[i + 1] ? argv[i + 1] : d; };
 const cachePath = val('--cache', CACHE);
 const task = val('--task', null);
-if (!task) {
-  console.error('usage: oc-rank.mjs --task <category|all> [--cache <file>] [--min-context <tokens>] [--json]');
-  process.exit(2);
-}
-if (!existsSync(cachePath)) {
-  console.error('no inventory cache — run: node oc-models.mjs --probe');
+const scoresPath = val('--scores', join(homedir(), '.config', 'opencode-dispatch', 'scores.json'));
+const noFree = argv.includes('--no-free');
+const USAGE = 'usage: oc-rank.mjs --cache <file> --task <category|all> [--min-context <tokens>] [--scores <file>] [--json] [--no-free]';
+if (!cachePath || !task) {
+  console.error(USAGE);
   process.exit(2);
 }
 const SAME = 5, CLOSE = 10, SPEED_EQUAL = 1.3;
 
-const cache = JSON.parse(readFileSync(cachePath, 'utf8'));
-const table = loadBenchmarks();
-const internalTable = loadInternal();
-const limits = loadLimits();
-const refreshed = Math.max(Date.parse(cache.created || '') || 0, Date.parse(cache.updated || '') || 0);
-const ageHours = refreshed ? (Date.now() - refreshed) / 36e5 : 0;
-const stale = ageHours > CACHE_MAX_AGE_H;
+const minContextRaw = val('--min-context', '0');
+const minContext = Number(minContextRaw);
+if (!Number.isFinite(minContext) || minContext < 0) {
+  console.error(`usage: --min-context must be a finite number >= 0, got ${minContextRaw}`);
+  process.exit(2);
+}
+
+// Read + parse + shape-check a JSON input: any failure is one lower-case line and exit 2, never a raw stack
+const loadJson = (path, shapeError) => {
+  let text;
+  try { text = readFileSync(path, 'utf8'); } catch (e) { console.error(`cannot read ${path}: ${e.code || e.message}`); process.exit(2); }
+  let data;
+  try { data = JSON.parse(text); } catch (e) { console.error(`cannot read ${path}: ${e.message}`); process.exit(2); }
+  const why = shapeError(data);
+  if (why) { console.error(`${path} ${why}`); process.exit(2); }
+  return data;
+};
+const isObj = (x) => x !== null && typeof x === 'object';
+const cache = loadJson(cachePath, (d) => (isObj(d) && Array.isArray(d.models) ? null : 'has no models array'));
+const table = loadJson(scoresPath, (d) => (isObj(d) && isObj(d.models) && isObj(d.categories) ? null : 'has no models or categories'));
 const byAlias = new Map();
 for (const [key, m] of Object.entries(table.models)) for (const a of m.aliases || []) byAlias.set(a, { key, ...m });
 
+const now = new Date();
+const pausedMap = paused(now);
+const pausedList = [...pausedMap.entries()];
+const dueSet = new Set(due(now));
+
+const plan = (id) => id.startsWith('bailian-token-plan-personal/') ? 'token'
+  : id.startsWith('opencode/') ? 'free'
+  : id.startsWith('opencode-go/') ? 'go'
+  : 'paid';
 const PLAN_LABEL = { token: 'Qwen token plan', free: 'Zen free', go: 'Go plan', paid: 'pay-as-you-go' };
 
 // Usable: probe result when probed; without a probe (cache built without --probe) every model is a candidate, with a warning.
-// Models the official live list no longer has (live === false) are never dispatched. Models blocked in limits.json
-// (rate limit / quota exhausted) are excluded exactly like failed probes; they are listed below.
-const minContext = Number(val('--min-context', 0));
-const now = new Date();
-const blocked = Object.entries(limits)
-  .map(([id, limit]) => ({ id, limit, until: blockedUntil(id, now, limits) }))
-  .filter((x) => x.until);
-const blockedIds = new Set(blocked.map((x) => x.id));
-const blockedLines = blocked.map(({ id, limit, until }) => limit.source === 'no-reset'
-  ? `limited: ${id} — needs owner action`
-  : `limited: ${id} until ${until.toLocaleString()} (${limit.source})`);
-const usable = cache.models.filter((m) => m.id && m.live !== false && (!m.probe || m.probe.ok)
-  && (!minContext || (m.context ?? 0) >= minContext) && !blockedIds.has(m.id));
+// Models the official live list no longer has (live === false) are never dispatched. --min-context drops models whose
+// context is too small, and usable models whose context is unknown (they cannot be judged) — the latter are reported.
+const droppedUnknown = [];
+const usable = cache.models.filter((m) => {
+  if (!m.id || m.live === false || (m.probe && !m.probe.ok)) return false;
+  if (pausedMap.has(m.id)) return false; // rate limited: out of ranking and shadow runs
+  if (noFree && m.id.startsWith('opencode/')) return false; // Zen free: suppressed while the free limit lasts
+  if (!minContext) return true;
+  if (m.context == null) { droppedUnknown.push(m.id); return false; }
+  return m.context >= minContext;
+});
 const COST = { token: 0, free: 1, go: 2, paid: 3 };
 
 // Internal score (internal.json → models.<key>.<category>, computed by oc-track.mjs from the track record) weighs
@@ -116,12 +142,24 @@ function rankCategory(cat) {
   coverage.sort((x, y) => y.n - x.n || order.indexOf(x.b) - order.indexOf(y.b));
   const primary = coverage[0]?.b ?? null;
   scored.sort((a, b) => ((b.scores[primary] ?? -1e9) - (a.scores[primary] ?? -1e9)) || Object.keys(b.scores).length - Object.keys(a.scores).length);
-  // The primary benchmark only sets the start; if the blended gap shows anyone stronger (negative gap), it leads instead, until nobody is
+  // The primary benchmark only sets the start; if the blended gap shows anyone stronger (negative gap), it leads instead, until nobody is.
+  // Gaps need not be transitive (A beats B, B beats C, C beats A when the shared benchmarks differ): on revisiting a leader
+  // the walk has entered a cycle, and the best primary-benchmark score in that cycle leads (ties: the one visited first)
   let leader = scored[0];
-  for (let k = 0; k < scored.length && leader; k++) {
+  let cycle = null;
+  const visited = [];
+  const seenIds = new Set();
+  while (leader) {
+    seenIds.add(leader.id);
+    visited.push(leader);
     const better = scored.map((r) => ({ r, d: r === leader ? null : diff(leader, r) }))
       .filter((x) => x.d !== null && x.d < 0).sort((x, y) => x.d - y.d)[0];
     if (!better) break;
+    if (seenIds.has(better.r.id)) {
+      cycle = visited.slice(visited.findIndex((r) => r.id === better.r.id));
+      leader = cycle.reduce((best, r) => ((r.scores[primary] ?? -1e9) > (best.scores[primary] ?? -1e9) ? r : best), cycle[0]);
+      break;
+    }
     leader = better.r;
   }
   for (const r of scored) {
@@ -130,6 +168,7 @@ function rankCategory(cat) {
   }
   // One model version may have several entries (e.g. API and Zen free): same scores, so rules 2–4 choose by plan and speed
   const trail = [];
+  if (cycle) trail.push(`gaps are not transitive among ${cycle.map((r) => r.id).join(', ')}; leader chosen by ${primary ?? 'no primary benchmark'}`);
   let pick = leader;
   if (pick) {
     trail.push(`strongest: ${leader.model} (${leader.id}, ${primary && leader.scores[primary] !== undefined ? `${primary} ${leader.scores[primary]}` : 'no primary external benchmark'}${leader.internal ? `, internal score ${leader.internal.score} (c ${leader.internal.correctness} / q ${leader.internal.quality ?? '–'}, ${leader.internal.n} records)` : ''})`);
@@ -145,12 +184,14 @@ function rankCategory(cat) {
       const speed = (x) => byTask ? `task speed x${x.taskSpeed}` : x.seconds !== null ? `${x.seconds}s` : 'latency not probed';
       return { pick: quick[0], tie: quick.length > 1, how, speed, byTask };
     };
-    // Rule 2 (user's call: token plan beats speed): a token-plan model within 10 points wins; best score first, speed breaks ties
-    const tokens = scored.filter((x) => x.plan === 'token' && within(x, CLOSE))
-      .sort((a, b) => (a.gap - b.gap) || ((a.seconds ?? 1e9) - (b.seconds ?? 1e9)));
+    // Rule 2 (user's call: token plan beats speed): a token-plan model within 10 points wins; best score first, equal
+    // gaps resolved by the same speed rule as rule 3 (task speed when every tied candidate has it, else latency)
+    const tokens = scored.filter((x) => x.plan === 'token' && within(x, CLOSE)).sort((a, b) => a.gap - b.gap);
     if (tokens.length) {
-      pick = tokens[0];
-      if (pick !== leader) trail.push(`Qwen token plan within ${CLOSE} -> ${pick.id} (gap ${pick.gap.toFixed(1)}; token plan beats speed)`);
+      const tied = tokens.filter((x) => x.gap === tokens[0].gap);
+      const t = quickest(tied);
+      pick = t.pick;
+      if (pick !== leader) trail.push(`Qwen token plan within ${CLOSE} -> ${pick.id} (gap ${pick.gap.toFixed(1)}; token plan beats speed${tied.length > 1 ? `; equal gaps: ${t.how}` : ''})`);
     } else {
       const q = quickest(scored.filter((x) => within(x, SAME)));
       if (q.how) trail.push(`same capability (gap <= ${SAME}): ${q.how}`);
@@ -178,21 +219,28 @@ const results = cats.map(rankCategory);
 
 // Shadow-run candidates (SKILL.md "Shadow runs"): usable anonymous models — marked stealth in benchmarks.json — plus models the
 // table does not have yet (fill the table first; only models without external benchmarks get stealth). One entry per model,
-// the cheapest plan (free > Go > pay-as-you-go), so a model never shadow-runs twice.
-const shadowKey = (m) => byAlias.get(m.id)?.key ?? m.id.split('/').pop().replace(/-free$/, '');
+// the cheapest plan (free > Go > pay-as-you-go), so a model never shadow-runs twice. Only the stealth entries are shadow
+// candidates (JSON `shadow`); a model the table does not know yet is not anonymous until it is added and marked, so it is
+// listed separately (JSON `notInTable`).
+const shadowKey = (id) => byAlias.get(id)?.key ?? id.split('/').pop().replace(/-free$/, '');
+const pausedKeys = new Set([...pausedMap.keys()].map(shadowKey));
 const shadowMap = new Map();
 for (const m of usable) {
   const e = byAlias.get(m.id);
   if (e && !e.stealth) continue;
-  const k = shadowKey(m), cur = shadowMap.get(k);
+  const k = shadowKey(m.id), cur = shadowMap.get(k);
+  if (pausedKeys.has(k)) continue; // any entry paused: the anonymous model waits for the reset
   if (!cur || COST[plan(m.id)] < COST[plan(cur.id)]) shadowMap.set(k, { id: m.id, context: m.context ?? null, known: !!e });
 }
-const shadow = [...shadowMap.values()];
+const listed = [...shadowMap.values()];
+const shadow = noFree ? [] : listed.filter((m) => m.known);
+const notInTable = listed.filter((m) => !m.known);
 
 if (stale) console.error(`!! inventory cache is ${Math.floor(ageHours)}h old — re-run oc-models.mjs --probe`);
 
 if (argv.includes('--json')) {
-  console.log(JSON.stringify({ cache: { created: cache.created, updated: cache.updated, probed: cache.probed }, limited: blockedLines, results, shadow }, null, 2));
+  const pausedJson = pausedList.map(([id, e]) => ({ id, hitAt: e.hitAt, nextProbe: e.nextProbe, due: dueSet.has(id) }));
+  console.log(JSON.stringify({ cache: { created: cache.created, probed: cache.probed }, ...(noFree ? { noFree: true } : {}), results, ...(pausedJson.length ? { paused: pausedJson } : {}), shadow, notInTable, droppedUnknownContext: droppedUnknown }, null, 2));
 } else {
   for (const line of blockedLines) console.log(line);
   if (!cache.probed) console.log('!! the cache has no probe results (built without --probe); availability not confirmed');
@@ -210,8 +258,17 @@ if (argv.includes('--json')) {
     if (r.unscored.length) console.log(`  no scores in this category (needs a trial to compare): ${r.unscored.join(', ')}`);
   }
   const fmt = (m) => `${m.id} (context ${m.context ? Math.round(m.context / 1000) + 'k' : '?'})`;
-  const marked = shadow.filter((m) => m.known), unknown = shadow.filter((m) => !m.known);
-  if (marked.length) console.log(`\nshadow-run candidates (anonymous models marked stealth; run all when the conditions hold): ${marked.map(fmt).join(', ')}`);
-  if (unknown.length) console.log(`\nnot in the benchmark table yet (look up benchmarks and add them to benchmarks.json; mark stealth and shadow-run if none exist): ${unknown.map(fmt).join(', ')}`);
-  console.log(`\n* vendor-reported. Gap = weighted mean of the shared external benchmark gap (same name and version) and the internal score gap (internal weighs ${INTERNAL_WEIGHT}x); internal scores and past records: oc-track.mjs (internal.json).`);
+  if (droppedUnknown.length) console.log(`\ndropped (context unknown, --min-context ${minContext}): ${droppedUnknown.join(', ')}`);
+  if (pausedList.length) {
+    const clock = (v) => {
+      const d = new Date(v);
+      return Number.isNaN(d.getTime()) ? '?' : `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+    };
+    const list = pausedList.map(([id, e]) => `${id} (next probe ${clock(e.nextProbe)}${dueSet.has(id) ? ', DUE' : ''})`);
+    console.log(`\npaused (rate limited): ${list.join(', ')}`);
+  }
+  if (noFree) console.log('\nshadow runs paused (--no-free: free usage limit)');
+  else if (shadow.length) console.log(`\nshadow-run candidates (anonymous models marked stealth; run all when the conditions hold): ${shadow.map(fmt).join(', ')}`);
+  if (notInTable.length) console.log(`\nnot in the score table yet (look up benchmarks and add them to scores.json; mark stealth and shadow-run if none exist): ${notInTable.map(fmt).join(', ')}`);
+  console.log(`\n* vendor-reported. Gap = weighted mean of the shared external benchmark gap (same name and version) and the internal score gap (internal weighs ${INTERNAL_WEIGHT}x); internal scores and past records: oc-track.mjs.`);
 }
