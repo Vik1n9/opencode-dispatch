@@ -67,11 +67,12 @@ export function benchTable() {
       'free-good': { name: 'Free Good', aliases: ['opencode/free-good'], scores: { 'Bench A': bench(85) } },
       qwen: { name: 'Qwen', aliases: ['bailian-token-plan-personal/qwen-good'], scores: { 'Bench A': bench(82) } },
       weak: { name: 'Weak', aliases: ['vendor/weak'], scores: { 'Bench A': bench(60) } },
+      dup: { name: 'Dup', aliases: ['opencode/dup-free', 'opencode-go/dup'], scores: { 'Bench A': bench(88) } },
     },
   };
 }
 
-export function writeCache(home, ids, { created = new Date().toISOString(), updated, probed = true } = {}) {
+export function writeCache(home, ids, { created = new Date().toISOString(), updated, probed = true, seconds = {} } = {}) {
   const cache = {
     created,
     ...(updated ? { updated } : {}),
@@ -81,7 +82,7 @@ export function writeCache(home, ids, { created = new Date().toISOString(), upda
       name: id,
       live: true,
       context: 200000,
-      probe: { ok: true, seconds: id.startsWith('opencode/') ? 6 : 5 },
+      probe: { ok: true, seconds: seconds[id] ?? (id.startsWith('opencode/') ? 6 : 5) },
     })),
   };
   writeJson(join(home, 'cache.json'), cache);

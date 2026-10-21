@@ -12,28 +12,30 @@
 // training). All models on the official Go live list (https://opencode.ai/zen/go/v1/models) are listed, priced
 // from the Go docs table (https://opencode.ai/docs/go/); usage counts toward the Go monthly allowance. --no-go skips.
 //
-// Usage: node oc-models.mjs [--probe] [--probe-all] [--no-go] [--concurrency 6] [--timeout 120] [--json]
+// Usage: node oc-models.mjs [--probe] [--probe-all] [--no-go] [--concurrency 6] [--timeout 30] [--json]
 //                           [--cache <file>] [--max-age <hours>] [--force] [--only <model-id>]
 //   --cache <file>  write the inventory (with probe results); default $OC_DISPATCH_CACHE or
 //                   ~/.cache/opencode-dispatch/inventory.json, and that default is always written
-//   --max-age <h>   with --probe: reuse a cache younger than this (default 6 h) instead of probing
+//   --max-age <h>   with --probe: reuse a cache younger than this (default 12 h) instead of probing
 //   --force         with --probe: probe even when the cache is fresh
 //   --probe-all     probe every model, not just the ones the benchmark table knows plus official Zen free
 //   --only <id>     probe just this model and merge the result into --cache (use when a cached model fails
 //                   at dispatch time)
+//   --timeout <s>   a model that has not answered the probe within this many seconds fails it and is not
+//                   used until the next probe (default 30)
 
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { CACHE, loadBenchmarks, probeTargets } from './lib.mjs';
+import { CACHE, CACHE_MAX_AGE_H, loadBenchmarks, probeTargets } from './lib.mjs';
 
 const argv = process.argv.slice(2);
 const has = (f) => argv.includes(f);
 const val = (f, d) => { const i = argv.indexOf(f); return i >= 0 && argv[i + 1] ? argv[i + 1] : d; };
 const concurrency = Number(val('--concurrency', 6));
-const timeoutS = Number(val('--timeout', 120));
-const maxAgeH = Number(val('--max-age', 6));
+const timeoutS = Number(val('--timeout', 30));
+const maxAgeH = Number(val('--max-age', CACHE_MAX_AGE_H));
 const cachePath = val('--cache', CACHE);
 const only = val('--only', null);
 const ZEN_DOCS = 'https://opencode.ai/docs/zen/';

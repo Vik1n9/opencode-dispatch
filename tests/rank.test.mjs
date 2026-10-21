@@ -114,3 +114,30 @@ test('rank: internal score line shows correctness, quality and count', () => {
   assert.match(r.stdout, /internal 82 \(c 100 \/ q –, 12\)/);
   assert.match(r.stdout, /task speed x1\.5/);
 });
+
+test('rank: without task speed, a slower free entry beats a faster Go entry of the same model', () => {
+  const home = homeWith(['opencode-go/dup', 'opencode/dup-free'], { seconds: { 'opencode-go/dup': 2, 'opencode/dup-free': 20 } });
+  const r = rank(home);
+  assert.equal(r.code, 0, r.out);
+  assert.equal(pickOf(r.stdout), 'opencode/dup-free');
+  assert.match(r.stdout, /chosen by plan \(free first\)/);
+});
+
+test('rank: without task speed, a slow free model within 5 points beats a fast paid one', () => {
+  const home = homeWith(['vendor/strong', 'opencode/free-good'], { seconds: { 'vendor/strong': 1, 'opencode/free-good': 29 } });
+  const r = rank(home);
+  assert.equal(r.code, 0, r.out);
+  assert.equal(pickOf(r.stdout), 'opencode/free-good');
+});
+
+test('rank: measured task speed for every candidate still decides', () => {
+  const home = homeWith(['opencode-go/dup', 'opencode/dup-free'], { seconds: { 'opencode-go/dup': 9, 'opencode/dup-free': 1 } });
+  writeJson(join(home, 'internal.json'), { generated: 'test', models: { dup: { 'repo-coding': {
+    score: 90, correctness: 90, quality: null, qn: 0, n: 2, updated: '2026-10-21',
+    speed: { 'opencode/dup-free': { ratio: 3, n: 1, medianSeconds: 300 }, 'opencode-go/dup': { ratio: 1, n: 1, medianSeconds: 100 } },
+  } } } });
+  const r = rank(home);
+  assert.equal(r.code, 0, r.out);
+  assert.equal(pickOf(r.stdout), 'opencode-go/dup');
+  assert.match(r.stdout, /speed compared by measured task speed/);
+});

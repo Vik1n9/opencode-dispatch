@@ -9,7 +9,7 @@
 //
 // Usage: node oc-rank.mjs --task <category|all> [--cache <file>] [--min-context <tokens>] [--json]
 //   --cache        session inventory written by oc-models.mjs; default $OC_DISPATCH_CACHE or
-//                  ~/.cache/opencode-dispatch/inventory.json. Missing -> exit 2; older than 6 hours -> warn.
+//                  ~/.cache/opencode-dispatch/inventory.json. Missing -> exit 2; older than 12 hours -> warn.
 //   --min-context  drop entries whose context window is smaller (e.g. continuing a long session: 400000)
 //   categories are defined in benchmarks.json (repo-coding, terminal, greenfield, tools, gui-vision,
 //   reasoning, security, instruction, long-context)
@@ -23,9 +23,10 @@
 //      Leader = best on the primary benchmark, replaced by anyone the blended gap says is stronger.
 //      gap ≤ 5 same, ≤ 10 close, > 10 clearly weaker
 //   2. within 10 points, a Qwen token-plan model wins (token plan beats speed — user's call); best score first
-//   3. otherwise, among models within 5 points (same capability), the fastest (within 30% counts as equal
-//      speed; then free > Go > pay-as-you-go). Speed = task-completion speed (internal.<cat>.speed, same
-//      taskId compared) when every candidate has it, else probe latency
+//   3. otherwise, among models within 5 points (same capability), the fastest by task-completion speed
+//      (internal.<cat>.speed, same taskId compared; within 30% counts as equal, then free > Go > pay-as-you-go)
+//      when every candidate has it. Without it, probe latency is one noisy sample (entries of the same model
+//      swap order between probes), so the plan decides: free > Go > pay-as-you-go, latency only breaks ties
 //   4. pay-as-you-go is used only when no free / Go model is within 10 points — even when the paid entry is
 //      faster (user: free first whenever the gap is small); rule 3 is re-applied to the free / Go models
 //
@@ -34,7 +35,7 @@
 // One entry per model (the cheapest plan). Models the official live list no longer has are skipped.
 
 import { existsSync, readFileSync } from 'node:fs';
-import { CACHE, blockedUntil, loadBenchmarks, loadInternal, loadLimits, plan } from './lib.mjs';
+import { CACHE, CACHE_MAX_AGE_H, blockedUntil, loadBenchmarks, loadInternal, loadLimits, plan } from './lib.mjs';
 
 const argv = process.argv.slice(2);
 const val = (f, d) => { const i = argv.indexOf(f); return i >= 0 && argv[i + 1] ? argv[i + 1] : d; };
@@ -56,7 +57,7 @@ const internalTable = loadInternal();
 const limits = loadLimits();
 const refreshed = Math.max(Date.parse(cache.created || '') || 0, Date.parse(cache.updated || '') || 0);
 const ageHours = refreshed ? (Date.now() - refreshed) / 36e5 : 0;
-const stale = ageHours > 6;
+const stale = ageHours > CACHE_MAX_AGE_H;
 const byAlias = new Map();
 for (const [key, m] of Object.entries(table.models)) for (const a of m.aliases || []) byAlias.set(a, { key, ...m });
 
@@ -131,17 +132,16 @@ function rankCategory(cat) {
   if (pick) {
     trail.push(`strongest: ${leader.model} (${leader.id}, ${primary && leader.scores[primary] !== undefined ? `${primary} ${leader.scores[primary]}` : 'no primary external benchmark'}${leader.internal ? `, internal score ${leader.internal.score} (c ${leader.internal.correctness} / q ${leader.internal.quality ?? '–'}, ${leader.internal.n} records)` : ''})`);
     const within = (x, lim) => x.gap !== null && x.gap <= lim;
-    // Rule 3: the fastest candidate (within 30% counts as equally fast; then free > Go > pay-as-you-go).
-    // Speed: task speed (completion-time ratio on the same task, oc-track.mjs) when every candidate has it; response latency
-    // does not predict completion speed, so it is only the fallback
+    // Rule 3: with task speed for every candidate, the fastest (within 30% counts as equally fast; then free > Go >
+    // pay-as-you-go). Without it the plan decides — probe latency is too noisy to rank by — and latency breaks ties
     const quickest = (cands) => {
       const byTask = cands.length > 1 && cands.every((x) => x.taskSpeed !== null);
       const sp = (x) => (byTask ? x.taskSpeed : x.seconds) ?? 1e9;
       const fastest = Math.min(...cands.map(sp));
-      const quick = cands.filter((x) => sp(x) <= fastest * SPEED_EQUAL).sort((a, b) => (COST[a.plan] - COST[b.plan]) || (sp(a) - sp(b)));
-      const how = cands.length < 2 ? '' : byTask ? 'speed compared by measured task speed' : fastest < 1e9 ? 'speed compared by response latency (some candidates lack task speed; latency does not predict completion speed)' : 'no speed data; chosen by plan';
+      const quick = (byTask ? cands.filter((x) => sp(x) <= fastest * SPEED_EQUAL) : cands).sort((a, b) => (COST[a.plan] - COST[b.plan]) || (sp(a) - sp(b)));
+      const how = cands.length < 2 ? '' : byTask ? 'speed compared by measured task speed' : 'some candidates lack task speed; chosen by plan (free first), latency only breaks ties';
       const speed = (x) => byTask ? `task speed x${x.taskSpeed}` : x.seconds !== null ? `${x.seconds}s` : 'latency not probed';
-      return { pick: quick[0], tie: quick.length > 1, how, speed };
+      return { pick: quick[0], tie: quick.length > 1, how, speed, byTask };
     };
     // Rule 2 (user's call: token plan beats speed): a token-plan model within 10 points wins; best score first, speed breaks ties
     const tokens = scored.filter((x) => x.plan === 'token' && within(x, CLOSE))
@@ -152,7 +152,7 @@ function rankCategory(cat) {
     } else {
       const q = quickest(scored.filter((x) => within(x, SAME)));
       if (q.how) trail.push(`same capability (gap <= ${SAME}): ${q.how}`);
-      if (q.pick !== leader) trail.push(`fastest with same capability${q.tie ? ' (similar speed: cheaper plan)' : ''} -> ${q.pick.id} (${q.speed(q.pick)})`);
+      if (q.pick !== leader) trail.push(`${q.byTask ? `fastest with same capability${q.tie ? ' (similar speed: cheaper plan)' : ''}` : 'cheapest plan with same capability'} -> ${q.pick.id} (${q.speed(q.pick)})`);
       pick = q.pick;
       // Rule 4: pay-as-you-go only when no free / Go model is within 10 points; otherwise re-apply rule 3 among them (within 5 first, then 10)
       if (pick.plan === 'paid') {

@@ -21,6 +21,8 @@ export const TRACK = join(DIR, 'track.jsonl');
 export const INTERNAL = join(DIR, 'internal.json');
 export const LIMITS = join(DIR, 'limits.json');
 export const CACHE = process.env.OC_DISPATCH_CACHE || join(homedir(), '.cache', 'opencode-dispatch', 'inventory.json');
+// How long a probed inventory stays valid: oc-models skips probing below it, oc-rank warns above it.
+export const CACHE_MAX_AGE_H = 12;
 
 export function loadBenchmarks() {
   return JSON.parse(readFileSync(BENCHMARKS, 'utf8'));

@@ -5,7 +5,7 @@ A [Claude Code](https://claude.com/claude-code) skill that turns Claude into a d
 ## What it does
 
 - **Safe wrapper around `opencode run`** (`oc-run.mjs`): closes stdin (opencode hangs otherwise), sets `PWD` so the right project is used, requires an explicit model, streams the raw JSONL to a log, and prints a compact JSON summary.
-- **Official-first model inventory** (`oc-models.mjs`): reads the OpenCode Zen / Go docs and live model lists, adds API-key providers from the local catalog, and probes the models that can actually be ranked. The inventory is cached in `~/.cache/opencode-dispatch/` and reused for 6 hours, so most sessions start without probing.
+- **Official-first model inventory** (`oc-models.mjs`): reads the OpenCode Zen / Go docs and live model lists, adds API-key providers from the local catalog, and probes the models that can actually be ranked. The inventory is cached in `~/.cache/opencode-dispatch/` and reused for 12 hours, so most sessions start without probing.
 - **Capability-first ranking** (`oc-rank.mjs`): compares models only on the benchmarks of the task's category (repo coding, terminal, greenfield, tools, GUI / vision, reasoning, security, instruction following, long context), blends in an internal score from your own dispatch history, then applies plan and speed rules (flat-rate token plan first, free before paid, pay-as-you-go only when nothing close is cheaper).
 - **Benchmark table upkeep** (`oc-bench.mjs`): `lint` checks `benchmarks.json`; `add-model`, `add-alias`, `set-score` edit it and refuse any change that would break the lint rules.
 - **Track record and internal score** (`oc-track.mjs`): every reviewed dispatch is scored on three dimensions — correctness (returns, major / minor defects, scope violations, failed test reruns), output quality (the reviewer's 0–100 rating), and completion speed (compared across models that ran the same task; `compare --task-id` shows them side by side). Internal scores are derived from the raw history only, so they can always be rebuilt.
@@ -47,7 +47,7 @@ cd opencode-dispatch
 
 ```bash
 D=~/.agents/skills/opencode-dispatch/scripts
-node $D/oc-models.mjs --probe            # instant when the cached inventory is < 6 h old
+node $D/oc-models.mjs --probe            # instant when the cached inventory is < 12 h old
 node $D/oc-rank.mjs --task repo-coding
 node $D/oc-quota.mjs
 node $D/oc-run.mjs --model <provider/model> --dir <project> --title "fix-x" "<task description>"
