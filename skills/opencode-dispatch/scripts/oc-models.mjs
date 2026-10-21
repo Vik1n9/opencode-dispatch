@@ -28,7 +28,9 @@ import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { CACHE, CACHE_MAX_AGE_H, loadBenchmarks, probeTargets } from './lib.mjs';
+import { exitIfVersion, CACHE, CACHE_MAX_AGE_H, loadBenchmarks, probeTargets } from './lib.mjs';
+
+exitIfVersion();
 
 const argv = process.argv.slice(2);
 const has = (f) => argv.includes(f);

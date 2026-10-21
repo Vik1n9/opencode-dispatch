@@ -69,7 +69,9 @@
 //   speed       = { <entry id>: { ratio, n, medianSeconds } } as above
 
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
-import { INTERNAL, TRACK, keyOf, loadBenchmarks } from './lib.mjs';
+import { exitIfVersion, INTERNAL, TRACK, keyOf, loadBenchmarks } from './lib.mjs';
+
+exitIfVersion();
 
 const WINDOW = 10;
 

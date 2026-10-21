@@ -10,6 +10,9 @@
 //
 // keyOf() resolves an opencode model ID (an alias) to its key in benchmarks.json; plan() derives the
 // billing plan from the provider prefix.
+//
+// VERSION comes from ../VERSION (the skill folder install.sh links into place); every script calls
+// exitIfVersion() first, so `<script> --version` shows which version runs locally.
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -20,6 +23,14 @@ export const BENCHMARKS = join(DIR, 'benchmarks.json');
 export const TRACK = join(DIR, 'track.jsonl');
 export const INTERNAL = join(DIR, 'internal.json');
 export const LIMITS = join(DIR, 'limits.json');
+export const VERSION = readFileSync(new URL('../VERSION', import.meta.url), 'utf8').trim();
+
+export function exitIfVersion() {
+  if (!process.argv.includes('--version')) return;
+  console.log(`opencode-dispatch ${VERSION}`);
+  process.exit(0);
+}
+
 export const CACHE = process.env.OC_DISPATCH_CACHE || join(homedir(), '.cache', 'opencode-dispatch', 'inventory.json');
 // How long a probed inventory stays valid: oc-models skips probing below it, oc-rank warns above it.
 export const CACHE_MAX_AGE_H = 12;

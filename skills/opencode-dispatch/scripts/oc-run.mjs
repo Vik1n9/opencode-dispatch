@@ -20,7 +20,9 @@ import { spawn } from 'node:child_process';
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { LIMIT_RE, clearLimit, estimateReset, loadLimits, parseReset, recordLimit } from './lib.mjs';
+import { exitIfVersion, LIMIT_RE, clearLimit, estimateReset, loadLimits, parseReset, recordLimit } from './lib.mjs';
+
+exitIfVersion();
 
 const argv = process.argv.slice(2);
 const opts = { fork: false, agent: 'build', dir: process.cwd() };

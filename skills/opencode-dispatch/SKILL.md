@@ -11,7 +11,7 @@ Claude is the manager, opencode the worker. Claude cuts tasks, writes specs, pic
 
 ## Scripts and data
 
-Scripts: `node ~/.agents/skills/opencode-dispatch/scripts/<name>`. Each file header documents its options and formats — read it only when you need a detail.
+Scripts: `node ~/.agents/skills/opencode-dispatch/scripts/<name>`. Each file header documents its options and formats — read it only when you need a detail. `--version` on any script prints the installed version.
 
 | Script | Does |
 |---|---|

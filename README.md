@@ -43,6 +43,16 @@ cd opencode-dispatch
 
 `install.sh` symlinks `skills/opencode-dispatch` into `~/.agents/skills/` (and `~/.claude/skills/` if missing) and `config/benchmarks.json` into `~/.config/opencode-dispatch/`. Anything already in the way (including a pre-v2 `scores.json`) is moved to `~/.config/opencode-dispatch/backups/<timestamp>/`. Dispatching never writes to the repository.
 
+## Version
+
+The version lives in [`skills/opencode-dispatch/VERSION`](skills/opencode-dispatch/VERSION) (semantic versioning, starting at 1.0.0). Because the installed skill is a symlink to this checkout, any script tells you what runs locally:
+
+```bash
+node ~/.agents/skills/opencode-dispatch/scripts/oc-run.mjs --version   # opencode-dispatch 1.0.0
+```
+
+Bump it in the same commit as the change and tag the release `vX.Y.Z`: patch for fixes, minor for new features or rule changes, major when a data file format (`benchmarks.json`, `track.jsonl`, `internal.json`, `limits.json`) changes incompatibly.
+
 ## Quick start
 
 ```bash

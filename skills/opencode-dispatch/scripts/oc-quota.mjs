@@ -14,7 +14,9 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { blockedUntil, loadLimits } from './lib.mjs';
+import { exitIfVersion, blockedUntil, loadLimits } from './lib.mjs';
+
+exitIfVersion();
 
 const DIR = process.env.OC_TOKENBAR_DIR || join(homedir(), 'Library', 'Application Support', 'TokenBar');
 const APPLE_EPOCH = Date.UTC(2001, 0, 1); // Swift Date reference point (used by the ledger)

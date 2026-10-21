@@ -35,7 +35,9 @@
 // One entry per model (the cheapest plan). Models the official live list no longer has are skipped.
 
 import { existsSync, readFileSync } from 'node:fs';
-import { CACHE, CACHE_MAX_AGE_H, blockedUntil, loadBenchmarks, loadInternal, loadLimits, plan } from './lib.mjs';
+import { exitIfVersion, CACHE, CACHE_MAX_AGE_H, blockedUntil, loadBenchmarks, loadInternal, loadLimits, plan } from './lib.mjs';
+
+exitIfVersion();
 
 const argv = process.argv.slice(2);
 const val = (f, d) => { const i = argv.indexOf(f); return i >= 0 && argv[i + 1] ? argv[i + 1] : d; };

@@ -29,7 +29,9 @@
 // duplicate key / alias, unknown category).
 
 import { readFileSync, writeFileSync } from 'node:fs';
-import { BENCHMARKS } from './lib.mjs';
+import { BENCHMARKS, exitIfVersion } from './lib.mjs';
+
+exitIfVersion();
 
 const argv = process.argv.slice(2);
 const cmd = argv[0];
