@@ -44,9 +44,36 @@ export function loadInternal() {
   return existsSync(INTERNAL) ? JSON.parse(readFileSync(INTERNAL, 'utf8')) : { models: {} };
 }
 
+// Legacy Mac mini limits.json wrapped the records: { models: { <id>: { hitAt, message, probes,
+// lastProbe, nextProbe } } }. Accept that shape on read by mapping the old entries onto the flat
+// record format (keeping the re-probe schedule fields, so a legacy pause continues its backoff);
+// writes always use the flat format, so a legacy file is converted on its next write without
+// losing entries. Anything already flat passes through unchanged.
+export function normalizeLimits(data) {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return data;
+  const legacy = data.models;
+  if (!legacy || typeof legacy !== 'object' || Array.isArray(legacy)) return data;
+  const flat = {};
+  for (const [id, e] of Object.entries(legacy)) {
+    if (!e || typeof e !== 'object' || Array.isArray(e)) continue;
+    flat[id] = {
+      until: e.until ?? null,
+      source: e.source ?? 'probe',
+      message: e.message ?? '',
+      hits: e.hits ?? 1,
+      at: e.at ?? e.lastProbe ?? e.hitAt ?? null,
+      ...(e.hitAt !== undefined ? { hitAt: e.hitAt } : {}),
+      ...(e.probes !== undefined ? { probes: e.probes } : {}),
+      ...(e.lastProbe !== undefined ? { lastProbe: e.lastProbe } : {}),
+      ...(e.nextProbe !== undefined ? { nextProbe: e.nextProbe } : {}),
+    };
+  }
+  return flat;
+}
+
 // Written by another script (rate-limit / quota detector): { '<model id>': { until, source, message, hits, at } }.
 export function loadLimits() {
-  return existsSync(LIMITS) ? JSON.parse(readFileSync(LIMITS, 'utf8')) : {};
+  return existsSync(LIMITS) ? normalizeLimits(JSON.parse(readFileSync(LIMITS, 'utf8'))) : {};
 }
 
 export function keyOf(idOrKey, table = loadBenchmarks()) {

@@ -24,7 +24,7 @@
 import { mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { LIMITS } from './lib.mjs';
+import { LIMITS, normalizeLimits } from './lib.mjs';
 
 const FILE = LIMITS;
 const HOUR = 3_600_000;
@@ -38,8 +38,9 @@ const warnCorrupt = () => {
   console.error('limits.json is not valid JSON; ignoring it');
 };
 
-// The flat, id-keyed record map (the lib.mjs limits.json format). Anything that is not a plain object
-// counts as corrupt.
+// The flat, id-keyed record map (the lib.mjs limits.json format); the legacy Mac mini shape
+// ({ models: { <id>: … } }) is mapped onto it (see lib.mjs normalizeLimits). Anything that is not
+// a plain object counts as corrupt.
 export function readLimits() {
   let text;
   try {
@@ -55,7 +56,7 @@ export function readLimits() {
     warnCorrupt();
     return {};
   }
-  if (data && typeof data === 'object' && !Array.isArray(data)) return data;
+  if (data && typeof data === 'object' && !Array.isArray(data)) return normalizeLimits(data);
   warnCorrupt();
   return {};
 }
