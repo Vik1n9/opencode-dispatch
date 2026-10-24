@@ -127,7 +127,7 @@ test('oc-models: --probe --only records a rate-limit hit and a success clears it
   const limited = readJson(cache).models.find((m) => m.id === target.id);
   assert.equal(limited.probe.ok, false);
   assert.equal(limited.probe.error, 'rate limited (paused)');
-  const paused = readJson(join(configDir(sb), 'limits.json')).models;
+  const paused = readJson(join(configDir(sb), 'limits.json'));
   assert.equal(paused[target.id].probes, 0);
   assert.equal(paused[target.id].nextProbe,
     new Date(new Date(paused[target.id].hitAt).getTime() + 60 * 60 * 1000).toISOString());
@@ -138,5 +138,5 @@ test('oc-models: --probe --only records a rate-limit hit and a success clears it
   assert.equal(success.status, 0, success.stderr);
   const cleared = readJson(cache).models.find((m) => m.id === target.id);
   assert.equal(cleared.probe.ok, true);
-  assert.equal(target.id in readJson(join(configDir(sb), 'limits.json')).models, false);
+  assert.equal(target.id in readJson(join(configDir(sb), 'limits.json')), false);
 });

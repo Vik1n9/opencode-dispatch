@@ -212,7 +212,7 @@ test('oc-run: a quota event sets rateLimited and records the hit at hit + 1 h', 
   assert.equal(r.json.rateLimited, true);
   assert.deepEqual(r.json.limit, { type: 'provider.quota', message: 'Rate limit exceeded. Please try again later.' });
 
-  const entry = readJson(limitsPath(sb)).models['opencode/x'];
+  const entry = readJson(limitsPath(sb))['opencode/x'];
   assert.equal(entry.probes, 0);
   assert.equal(entry.message, 'Rate limit exceeded. Please try again later.');
   const hit = new Date(entry.hitAt).getTime();
@@ -238,12 +238,12 @@ test('oc-run: a later successful run clears the pause', (t) => {
   const failed = runScript(sb, 'oc-run.mjs', ['--model', 'opencode/x', 'hi'],
     { env: { ...SHIM_OK, OC_SHIM_EVENTS: limited } });
   assert.equal(failed.status, 1);
-  assert.ok(readJson(limitsPath(sb)).models['opencode/x']);
+  assert.ok(readJson(limitsPath(sb))['opencode/x']);
 
   const ok = writeEvents(sb, EVENTS);
   const r = runScript(sb, 'oc-run.mjs', ['--model', 'opencode/x', 'hi'],
     { env: { ...SHIM_OK, OC_SHIM_EVENTS: ok } });
   assert.equal(r.status, 0, r.stderr);
   assert.equal(r.json.rateLimited, false);
-  assert.equal('opencode/x' in readJson(limitsPath(sb)).models, false);
+  assert.equal('opencode/x' in readJson(limitsPath(sb)), false);
 });

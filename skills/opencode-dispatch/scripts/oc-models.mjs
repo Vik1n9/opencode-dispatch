@@ -12,27 +12,36 @@
 // training). All models on the official Go live list (https://opencode.ai/zen/go/v1/models) are listed, priced
 // from the Go docs table (https://opencode.ai/docs/go/); usage counts toward the Go monthly allowance. --no-go skips.
 //
-// Usage: node oc-models.mjs [--probe] [--no-go] [--concurrency 6] [--timeout 120] [--json]
-//                           [--cache <file>] [--only <model-id>]
-//   --cache <file>  write the inventory (with probe results) to a session cache file; later dispatches in the
-//                   same session read it via oc-rank.mjs instead of re-running this script; a missing parent
-//                   folder is created
+// Usage: node oc-models.mjs [--probe] [--probe-all] [--no-go] [--concurrency 6] [--timeout 30] [--json]
+//                           [--cache <file>] [--max-age <hours>] [--force] [--only <model-id>]
+//   --cache <file>  write the inventory (with probe results); default $OC_DISPATCH_CACHE or
+//                   ~/.cache/opencode-dispatch/inventory.json, and that default is always written;
+//                   a missing parent folder is created
+//   --max-age <h>   with --probe: reuse a cache younger than this (default 12 h) instead of probing
+//   --force         with --probe: probe even when the cache is fresh
+//   --probe-all     probe every model, not just the ones the benchmark table knows plus official Zen free
 //   --only <id>     probe just this model and merge the result into --cache (use when a cached model fails
 //                   at dispatch time); needs a cache from a full run
+//   --timeout <s>   a model that has not answered the probe within this many seconds fails it and is not
+//                   used until the next probe (default 30)
 // --probe records a rate-limited model as paused in limits.json (oc-limits.mjs) with error
 // `rate limited (paused)`, and clears the pause on success; re-probe a due model with
 // `--probe --only <id> --cache <file>`.
 //
 // Warnings (official page unreadable or empty, local catalog unavailable) go to stderr and into the cache.
-// Exit codes: 0 ok, 2 blocked environment or bad usage (--concurrency / --timeout not a positive integer,
-// --only unknown or with a missing / unparseable cache).
+// Exit codes: 0 ok, 2 blocked environment (cloud session / container) or bad usage (--concurrency /
+// --timeout not a positive integer, --only unknown or with a missing / unparseable cache). A missing or
+// unsupported opencode only warns (oc-check.mjs reports it).
 
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { checkEnvironment } from './oc-check.mjs';
+import { exitIfVersion, CACHE, CACHE_MAX_AGE_H, loadBenchmarks, probeTargets } from './lib.mjs';
+import { checkEnvironment, cloudSignal } from './oc-check.mjs';
 import { recordHit, recordSuccess, readLimits } from './oc-limits.mjs';
+
+exitIfVersion();
 
 const argv = process.argv.slice(2);
 const has = (f) => argv.includes(f);
@@ -48,10 +57,11 @@ const positiveInt = (flag, d) => {
   return Number(raw);
 };
 const concurrency = positiveInt('--concurrency', 6);
-const timeoutS = positiveInt('--timeout', 120);
+const timeoutS = positiveInt('--timeout', 30);
+const maxAgeH = Number(val('--max-age', CACHE_MAX_AGE_H));
 const probeTitle = `oc-models-probe-${process.pid}-${Date.now()}`;
 const only = val('--only', null);
-const cachePath = val('--cache', null);
+const cachePath = val('--cache', CACHE);
 const ZEN_DOCS = 'https://opencode.ai/docs/zen/';
 const ZEN_LIVE = 'https://opencode.ai/zen/v1/models';
 const GO_DOCS = 'https://opencode.ai/docs/go/';
@@ -59,13 +69,9 @@ const GO_LIVE = 'https://opencode.ai/zen/go/v1/models';
 const HOSTED = new Set(['opencode', 'opencode-go']); // OpenCode's own (Zen / Go): official information wins
 const warnings = [];
 
-const env = checkEnvironment();
-if (!env.ok) { console.error(env.error); process.exit(2); }
-if (has('--probe')) readLimits(); // surface a corrupt limits.json once, before probes record anything
-
 // --only merges into a cache from a full run; refuse before probing when that cache is missing or unreadable.
 let priorCache = null;
-if (only && cachePath) {
+if (only) {
   try { priorCache = JSON.parse(readFileSync(cachePath, 'utf8')); } catch { priorCache = null; }
   if (!priorCache || !Array.isArray(priorCache.models)) {
     console.error(`--only needs an existing cache from a full run: ${cachePath}`);
@@ -85,6 +91,14 @@ if (has('--probe') && !only && !has('--force') && existsSync(cachePath)) {
     }
   } catch { /* unreadable cache: rebuild it */ }
 }
+
+// Local machine only: a cloud session or container is refused; a missing / unsupported opencode or a
+// missing credential only warns — the inventory degrades to the official lists and says so.
+const cloud = cloudSignal();
+if (cloud) { console.error(cloud); process.exit(2); }
+const envCheck = checkEnvironment();
+if (!envCheck.ok) console.error(`warning: ${envCheck.error}`);
+if (has('--probe')) readLimits(); // surface a corrupt limits.json once, before probes record anything
 
 const dir = mkdtempSync(join(tmpdir(), 'oc-models-'));
 // 60 s: a hung background service must not block the inventory forever; failures surface as warnings.
@@ -271,7 +285,6 @@ if (has('--probe')) {
     }
   }
   writeFileSync(join(dir, 'n.txt'), '42\n');
-  const queue = models.filter((m) => m.id);
   await Promise.all(Array.from({ length: concurrency }, async () => {
     for (let m = queue.shift(); m; m = queue.shift()) m.probe = await probeOne(m);
   }));
@@ -284,22 +297,19 @@ if (has('--probe')) {
 }
 rmSync(dir, { recursive: true, force: true });
 
-/* ---------- Write the session cache ---------- */
-if (cachePath) {
-  let cache = { created: new Date().toISOString(), officialError, warnings, models: [] };
-  if (only) {
-    cache = priorCache;
-    cache.models = cache.models.filter((m) => m.id !== only).concat(models);
-    cache.officialError = officialError;
-    cache.warnings = warnings;
-    cache.updated = new Date().toISOString();
-  } else {
-    cache.models = models;
-    cache.probed = has('--probe');
-  }
-  mkdirSync(dirname(cachePath), { recursive: true });
-  writeFileSync(cachePath, JSON.stringify(cache, null, 2));
+/* ---------- Write the inventory cache (the default path is always written) ---------- */
+let cache;
+if (only) {
+  cache = priorCache;
+  cache.models = (cache.models || []).filter((m) => m.id !== only).concat(models);
+  cache.officialError = officialError;
+  cache.warnings = warnings;
+  cache.updated = new Date().toISOString();
+  if (has('--probe')) cache.probed = true;
+} else {
+  cache = { created: new Date().toISOString(), officialError, warnings, models, probed: has('--probe') };
 }
+mkdirSync(dirname(cachePath), { recursive: true });
 writeFileSync(cachePath, JSON.stringify(cache, null, 2));
 
 /* ---------- Output ---------- */

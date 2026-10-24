@@ -37,7 +37,9 @@ const isTrue = (v) => TRUE_VALUES.includes((v ?? '').trim().toLowerCase());
 const isOff = (v) => OFF_VALUES.includes((v ?? '').trim().toLowerCase());
 
 // Which signal says "not the local machine" (null when none does). Plain SSH is allowed.
-function cloudSignal() {
+// Exported so the dispatch scripts can refuse cloud sessions and containers before anything else,
+// while treating a missing / unsupported opencode as a warning (install.sh fixes it later).
+export function cloudSignal() {
   for (const name of CLOUD_TRUE) {
     const value = process.env[name];
     if (isTrue(value)) {

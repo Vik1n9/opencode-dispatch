@@ -33,13 +33,13 @@ test('install.sh: opencode missing warns, exits 0 and creates the links', (t) =>
 
   const agents = join(sb.home, '.agents', 'skills', 'opencode-dispatch');
   const claude = join(sb.home, '.claude', 'skills', 'opencode-dispatch');
-  const scores = join(sb.home, '.config', 'opencode-dispatch', 'scores.json');
+  const benchmarks = join(sb.home, '.config', 'opencode-dispatch', 'benchmarks.json');
   assert.equal(lstatSync(agents).isSymbolicLink(), true);
   assert.equal(readlinkSync(agents), join(ROOT, 'skills', 'opencode-dispatch'));
   assert.equal(lstatSync(claude).isSymbolicLink(), true);
   assert.equal(readlinkSync(claude), '../../.agents/skills/opencode-dispatch');
-  assert.equal(lstatSync(scores).isSymbolicLink(), true);
-  assert.equal(readlinkSync(scores), join(ROOT, 'config', 'scores.json'));
+  assert.equal(lstatSync(benchmarks).isSymbolicLink(), true);
+  assert.equal(readlinkSync(benchmarks), join(ROOT, 'config', 'benchmarks.json'));
 });
 
 test('install.sh: with opencode logged in it exits 0 and reports ok on a second run', (t) => {
@@ -53,7 +53,7 @@ test('install.sh: with opencode logged in it exits 0 and reports ok on a second 
   const second = runBash(sb, [INSTALL], { env: SHIM_OK });
   assert.equal(second.status, 0);
   assert.match(second.stdout, /ok       .*opencode-dispatch/);
-  assert.match(second.stdout, /ok       .*scores\.json/);
+  assert.match(second.stdout, /ok       .*benchmarks\.json/);
 });
 
 test('install.sh: a missing credential (exit 3) still installs with a warning', (t) => {

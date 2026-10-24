@@ -7,11 +7,16 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const ROOT = fileURLToPath(new URL('..', import.meta.url));
+export const repo = ROOT;
 export const SCRIPTS = join(ROOT, 'skills', 'opencode-dispatch', 'scripts');
+export const trackScript = join(SCRIPTS, 'oc-track.mjs');
+export const rankScript = join(SCRIPTS, 'oc-rank.mjs');
 
 // The scripts refuse cloud sessions and containers; tests must not inherit the caller's markers.
+// OC_DISPATCH_HOME / OC_DISPATCH_CACHE are stripped too: every test points them at its own temp folder,
+// and an inherited value would redirect the scripts into the caller's data (or the suite's .testhome).
 const CLOUD_VARS = ['CLAUDE_CODE_REMOTE', 'CODESPACES', 'REMOTE_CONTAINERS', 'GITPOD_WORKSPACE_ID',
-  'DEVCONTAINER', 'KUBERNETES_SERVICE_HOST', 'container'];
+  'DEVCONTAINER', 'KUBERNETES_SERVICE_HOST', 'container', 'OC_DISPATCH_HOME', 'OC_DISPATCH_CACHE'];
 
 export function cleanEnv() {
   const env = { ...process.env };
@@ -152,10 +157,6 @@ export function configDir(sb) {
   return join(sb.home, '.config', 'opencode-dispatch');
 }
 
-export function writeScores(sb, data) {
-  writeJson(join(configDir(sb), 'scores.json'), data);
-}
-
 export function writeTrack(sb, lines) {
   const path = join(configDir(sb), 'track.jsonl');
   mkdirSync(dirname(path), { recursive: true });
@@ -171,4 +172,80 @@ export function writeEvents(sb, lines) {
   const path = join(sb.dir, `events-${Date.now()}-${Math.random().toString(16).slice(2)}.jsonl`);
   writeFileSync(path, lines.map((l) => JSON.stringify(l)).join('\n') + '\n');
   return path;
+}
+
+/* ---------- Data-folder fixtures (the oc-track / oc-rank / compare suites) ---------- */
+
+export const tempHome = () => mkdtempSync(join(tmpdir(), 'oc-dispatch-test-'));
+
+export function writeBenchmarks(home, table) {
+  writeJson(join(home, 'benchmarks.json'), table);
+}
+
+export function run(script, args, home, env = {}) {
+  const res = spawnSync(process.execPath, [script, ...args], {
+    encoding: 'utf8',
+    env: { ...cleanEnv(), OC_DISPATCH_HOME: home, ...env },
+  });
+  return { code: res.status, stdout: res.stdout, stderr: res.stderr, out: res.stdout + res.stderr };
+}
+
+export function readInternal(home) {
+  return JSON.parse(readFileSync(join(home, 'internal.json'), 'utf8'));
+}
+
+export function record(overrides = {}) {
+  return {
+    date: '2026-10-20',
+    project: 'test',
+    task: 'test task',
+    category: 'repo-coding',
+    model: 'alpha/one',
+    result: 'passed',
+    returns: 0,
+    defects: [],
+    scope: 0,
+    seconds: 30,
+    steps: 5,
+    ...overrides,
+  };
+}
+
+// Small curated table: one category with one comparable benchmark, four plans + a weak model.
+export function benchTable() {
+  const bench = (value) => ({ value, source: 'vendor', ref: 'https://example.invalid' });
+  return {
+    _about: 'test fixture',
+    categories: {
+      'repo-coding': { label: 'Coding', benchmarks: ['Bench A'] },
+      terminal: { label: 'Terminal', benchmarks: ['Bench B'] },
+    },
+    models: {
+      alpha: { name: 'Alpha', aliases: ['alpha/one'], scores: { 'Bench A': bench(80) } },
+      beta: { name: 'Beta', aliases: ['beta/two'], scores: { 'Bench B': bench(70) } },
+      strong: { name: 'Strong', aliases: ['vendor/strong'], scores: { 'Bench A': bench(90) } },
+      second: { name: 'Second', aliases: ['vendor/second'], scores: { 'Bench A': bench(80) } },
+      'free-good': { name: 'Free Good', aliases: ['opencode/free-good'], scores: { 'Bench A': bench(85) } },
+      qwen: { name: 'Qwen', aliases: ['bailian-token-plan-personal/qwen-good'], scores: { 'Bench A': bench(82) } },
+      weak: { name: 'Weak', aliases: ['vendor/weak'], scores: { 'Bench A': bench(60) } },
+      dup: { name: 'Dup', aliases: ['opencode/dup-free', 'opencode-go/dup'], scores: { 'Bench A': bench(88) } },
+    },
+  };
+}
+
+export function writeCache(home, ids, { created = new Date().toISOString(), updated, probed = true, seconds = {} } = {}) {
+  const cache = {
+    created,
+    ...(updated ? { updated } : {}),
+    probed,
+    models: ids.map((id) => ({
+      id,
+      name: id,
+      live: true,
+      context: 200000,
+      probe: { ok: true, seconds: seconds[id] ?? (id.startsWith('opencode/') ? 6 : 5) },
+    })),
+  };
+  writeJson(join(home, 'cache.json'), cache);
+  return cache;
 }

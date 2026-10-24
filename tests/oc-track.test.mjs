@@ -1,9 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { lstatSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
-  makeSandbox, runScript, writeShim, writeJson, writeScores, writeTrack, configDir, readJson, SHIM_OK,
+  makeSandbox, runScript, writeShim, writeJson, writeBenchmarks, writeTrack, configDir, readJson, SHIM_OK,
 } from './helpers.mjs';
 
 const CAT = 'repo-coding';
@@ -28,7 +28,7 @@ function scores() {
 function sb(t) {
   const box = makeSandbox();
   writeShim(box);
-  writeScores(box, scores());
+  writeBenchmarks(configDir(box), scores());
   return box;
 }
 
@@ -81,9 +81,9 @@ test('oc-track: internal score is the mean of the last 10 records in the categor
       ['add', '--json', JSON.stringify(rec({ returns: i, task: `t${i}` }))], { env: SHIM_OK });
     assert.equal(r.status, 0, r.stderr);
   }
-  const saved = readJson(join(configDir(box), 'scores.json'));
-  assert.equal(saved.models.a.internal[CAT].score, 36);
-  assert.equal(saved.models.a.internal[CAT].n, 12);
+  const saved = readJson(join(configDir(box), 'internal.json'));
+  assert.equal(saved.models.a[CAT].score, 36);
+  assert.equal(saved.models.a[CAT].n, 12);
 });
 
 test('oc-track: a separate category keeps a separate internal score', (t) => {
@@ -94,9 +94,9 @@ test('oc-track: a separate category keeps a separate internal score', (t) => {
   };
   add(rec({ returns: 1 }));
   add(rec({ category: 'terminal', returns: 4 }));
-  const saved = readJson(join(configDir(box), 'scores.json'));
-  assert.equal(saved.models.a.internal[CAT].score, 90);
-  assert.equal(saved.models.a.internal.terminal.score, 60);
+  const saved = readJson(join(configDir(box), 'internal.json'));
+  assert.equal(saved.models.a[CAT].score, 90);
+  assert.equal(saved.models.a.terminal.score, 60);
 });
 
 test('oc-track: speed ratios per taskId use the fastest passing run and skip non-comparable runs', (t) => {
@@ -108,12 +108,12 @@ test('oc-track: speed ratios per taskId use the fastest passing run and skip non
   add(rec({ model: A, seconds: 100, taskId: 'task-1' }));
   add(rec({ model: B, seconds: 200, taskId: 'task-1' }));
   add(rec({ model: C, seconds: 50, taskId: 'task-1', speedComparable: false }));
-  const saved = readJson(join(configDir(box), 'scores.json'));
-  assert.deepEqual(saved.models.a.internal[CAT].speed[A], { ratio: 1, n: 1, medianSeconds: 100 });
-  assert.deepEqual(saved.models.b.internal[CAT].speed[B], { ratio: 2, n: 1, medianSeconds: 200 });
+  const saved = readJson(join(configDir(box), 'internal.json'));
+  assert.deepEqual(saved.models.a[CAT].speed[A], { ratio: 1, n: 1, medianSeconds: 100 });
+  assert.deepEqual(saved.models.b[CAT].speed[B], { ratio: 2, n: 1, medianSeconds: 200 });
   // C excluded from the comparison, but its median seconds still record the run
-  assert.equal(saved.models.c.internal[CAT].speed[C].ratio, null);
-  assert.equal(saved.models.c.internal[CAT].speed[C].n, 0);
+  assert.equal(saved.models.c[CAT].speed[C].ratio, null);
+  assert.equal(saved.models.c[CAT].speed[C].n, 0);
 });
 
 test('oc-track: speed ratios ignore failed runs when finding the fastest', (t) => {
@@ -125,9 +125,9 @@ test('oc-track: speed ratios ignore failed runs when finding the fastest', (t) =
   add(rec({ model: A, seconds: 100, taskId: 'task-2' }));
   add(rec({ model: B, seconds: 200, taskId: 'task-2' }));
   add(rec({ model: C, seconds: 10, taskId: 'task-2', result: 'failed' }));
-  const saved = readJson(join(configDir(box), 'scores.json'));
-  assert.deepEqual(saved.models.a.internal[CAT].speed[A], { ratio: 1, n: 1, medianSeconds: 100 });
-  assert.deepEqual(saved.models.b.internal[CAT].speed[B], { ratio: 2, n: 1, medianSeconds: 200 });
+  const saved = readJson(join(configDir(box), 'internal.json'));
+  assert.deepEqual(saved.models.a[CAT].speed[A], { ratio: 1, n: 1, medianSeconds: 100 });
+  assert.deepEqual(saved.models.b[CAT].speed[B], { ratio: 2, n: 1, medianSeconds: 200 });
 });
 
 test('oc-track: validation errors exit 2', (t) => {
@@ -143,12 +143,12 @@ test('oc-track: validation errors exit 2', (t) => {
     { args: ['grade', '--json', JSON.stringify(rec({ returns: 1.5 }))], why: /invalid returns: 1.5/ },
     { args: ['grade', '--json', JSON.stringify(rec({ scope: -2 }))], why: /invalid scope: -2/ },
     { args: ['grade', '--json', JSON.stringify(rec({ seconds: -1 }))], why: /invalid seconds: -1/ },
-    { args: ['grade', '--json', JSON.stringify(rec({ model: 'nope/nope' }))], why: /model not in scores\.json/ },
+    { args: ['grade', '--json', JSON.stringify(rec({ model: 'nope/nope' }))], why: /model not in benchmarks\.json/ },
     { args: ['grade', '--json', '{not json'], why: /invalid JSON/ },
     { args: ['grade', '--json', '[]'], why: /not a JSON object/ },
     { args: ['grade'], why: /needs --json or --file/ },
     { args: ['grade', '--file', join(box.dir, 'missing.json')], why: /cannot read .*file not found/ },
-    { args: ['show', '--model', 'nope/nope'], why: /model not in scores\.json/ },
+    { args: ['show', '--model', 'nope/nope'], why: /model not in benchmarks\.json/ },
     { args: [], why: /usage: oc-track\.mjs/ },
   ];
   for (const c of cases) {
@@ -169,9 +169,10 @@ test('oc-track: legacy Chinese results are accepted', (t) => {
 test('oc-track: show skips a corrupt track line; add and recompute refuse and write nothing', (t) => {
   const box = sb(t);
   const trackPath = writeTrack(box, [JSON.stringify(rec({ returns: 1 })), '{corrupt']);
-  const scoresPath = join(configDir(box), 'scores.json');
+  const benchPath = join(configDir(box), 'benchmarks.json');
+  const internalPath = join(configDir(box), 'internal.json');
   const trackBefore = readFileSync(trackPath);
-  const scoresBefore = readFileSync(scoresPath);
+  const benchBefore = readFileSync(benchPath);
 
   const show = runScript(box, 'oc-track.mjs', ['show'], { env: SHIM_OK });
   assert.equal(show.status, 0);
@@ -182,21 +183,22 @@ test('oc-track: show skips a corrupt track line; add and recompute refuse and wr
   assert.equal(add.status, 2);
   assert.match(add.stderr, /line 2 is not valid JSON; fix or remove it first/);
   assert.deepEqual(readFileSync(trackPath), trackBefore);
-  assert.deepEqual(readFileSync(scoresPath), scoresBefore);
+  assert.deepEqual(readFileSync(benchPath), benchBefore);
+  assert.equal(existsSync(internalPath), false);
 
   const recompute = runScript(box, 'oc-track.mjs', ['recompute'], { env: SHIM_OK });
   assert.equal(recompute.status, 2);
   assert.match(recompute.stderr, /line 2 is not valid JSON; fix or remove it first/);
   assert.deepEqual(readFileSync(trackPath), trackBefore);
-  assert.deepEqual(readFileSync(scoresPath), scoresBefore);
+  assert.deepEqual(readFileSync(benchPath), benchBefore);
+  assert.equal(existsSync(internalPath), false);
 });
 
-test('oc-track: a symlinked scores.json stays a symlink after add', (t) => {
+test('oc-track: a symlinked internal.json stays a symlink after add', (t) => {
   const box = sb(t);
-  const real = join(box.dir, 'real-scores.json');
-  writeJson(real, scores());
-  const link = join(configDir(box), 'scores.json');
-  rmSync(link);
+  const real = join(box.dir, 'real-internal.json');
+  writeJson(real, { generated: 'fixture', models: {} });
+  const link = join(configDir(box), 'internal.json');
   symlinkSync(real, link);
 
   const r = runScript(box, 'oc-track.mjs', ['add', '--json', JSON.stringify(rec())], { env: SHIM_OK });
@@ -204,7 +206,7 @@ test('oc-track: a symlinked scores.json stays a symlink after add', (t) => {
   assert.equal(lstatSync(link).isSymbolicLink(), true);
   assert.equal(realpathSync(link), realpathSync(real));
   const saved = readJson(real);
-  assert.equal(saved.models.a.internal[CAT].score, 100);
+  assert.equal(saved.models.a[CAT].score, 100);
 });
 
 test('oc-track: recompute rebuilds every internal score from the track record', (t) => {
@@ -217,18 +219,16 @@ test('oc-track: recompute rebuilds every internal score from the track record', 
   add(rec({ model: B, returns: 3 }));
 
   // Wipe the derived scores, then rebuild them from track.jsonl.
-  const scoresPath = join(configDir(box), 'scores.json');
-  const data = readJson(scoresPath);
-  data.models.a.internal = { score: 1, n: 99 };
-  writeFileSync(scoresPath, JSON.stringify(data, null, 2) + '\n');
+  const internalPath = join(configDir(box), 'internal.json');
+  writeFileSync(internalPath, JSON.stringify({ generated: 'stale', models: { a: { score: 1, n: 99 } } }, null, 2) + '\n');
 
   const r = runScript(box, 'oc-track.mjs', ['recompute'], { env: SHIM_OK });
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /recomputed 2 records/);
-  const saved = readJson(scoresPath);
-  assert.equal(saved.models.a.internal[CAT].score, 90);
-  assert.equal(saved.models.a.internal[CAT].n, 1);
-  assert.equal(saved.models.b.internal[CAT].score, 70);
+  const saved = readJson(internalPath);
+  assert.equal(saved.models.a[CAT].score, 90);
+  assert.equal(saved.models.a[CAT].n, 1);
+  assert.equal(saved.models.b[CAT].score, 70);
 });
 
 test('oc-track: show filters by model, category and --last', (t) => {
@@ -266,7 +266,7 @@ test('oc-track: add --file appends one record and prints the graded summary', (t
   writeFileSync(file, JSON.stringify(rec({ seconds: 12, steps: 3 })));
   const r = runScript(box, 'oc-track.mjs', ['add', '--file', file], { env: SHIM_OK });
   assert.equal(r.status, 0, r.stderr);
-  assert.match(r.stdout, /recorded: a \/ repo-coding graded 100 -> internal score 100 \(1 records\)/);
+  assert.match(r.stdout, /recorded: a \/ repo-coding graded 100 \(correctness 100\) -> internal score 100 \(1 records\)/);
   const lines = readFileSync(join(configDir(box), 'track.jsonl'), 'utf8').trim().split('\n');
   assert.equal(lines.length, 1);
   const saved = JSON.parse(lines[0]);
@@ -274,10 +274,10 @@ test('oc-track: add --file appends one record and prints the graded summary', (t
   assert.equal(saved.modelKey, 'a');
 });
 
-test('oc-track: a missing score table exits 2', (t) => {
+test('oc-track: a missing benchmark table exits 2', (t) => {
   const box = makeSandbox();
   writeShim(box);
   const r = runScript(box, 'oc-track.mjs', ['show'], { env: SHIM_OK });
   assert.equal(r.status, 2);
-  assert.match(r.stderr, /cannot read the score table .*file not found/);
+  assert.match(r.stderr, /cannot read the benchmark table .*file not found/);
 });

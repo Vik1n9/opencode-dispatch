@@ -12,22 +12,29 @@
 //                   [--prompt-file <file> | <message...>]
 //
 // Prints JSON: { ok, exitCode, sessionID, rateLimited, limit, title, agent, model, dir, seconds,
-//                text, tools[], steps, cost, tokens, errors[], log }
+//                text, tools[], steps, cost, tokens, errors[], log, limited? }
 //   rateLimited is true when an error event, a failed tool or stderr shows a quota / rate-limit
 //   failure (provider.quota, status 429, FreeUsageLimitError, "rate limit exceeded");
 //   limit then holds { type, message } (message <= 200 chars), otherwise null. ok stays false.
-//   A rate-limited run records a per-model pause in limits.json (oc-limits.mjs); a successful
-//   run clears it.
+//
+// When the error text looks like a rate limit / quota ("rate limit", "429", "insufficient balance" …),
+// the reset time is parsed from the message or estimated from the plan, the entry is written to
+// limits.json (so oc-rank skips the model), and `limited: { until, source, message }` is added while
+// ok stays false. The same hit also records the per-model re-probe pause (oc-limits.mjs backoff);
+// a successful run clears the model's entry.
 //
 // Exit codes: 0 run ok, 1 run failed (summary.ok is false), 2 bad arguments or
-// environment check failed.
+// a cloud session / container. A missing or unsupported opencode only warns (oc-check.mjs reports it).
 
 import { spawn } from 'node:child_process';
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { checkEnvironment } from './oc-check.mjs';
+import { exitIfVersion, LIMIT_RE, estimateReset, parseReset } from './lib.mjs';
+import { checkEnvironment, cloudSignal } from './oc-check.mjs';
 import { recordHit, recordSuccess, readLimits } from './oc-limits.mjs';
+
+exitIfVersion();
 
 const argv = process.argv.slice(2);
 const opts = { fork: false, agent: 'build', dir: process.cwd() };
@@ -65,8 +72,12 @@ if (!opts.model) fail('--model is required (provider/model, see `opencode models
 if (!opts.prompt.trim()) fail('empty prompt');
 if (opts.fork && !opts.session) fail('--fork needs --session');
 if (opts.agent !== 'build' && opts.agent !== 'plan') fail(`unknown agent: ${opts.agent} (expected build or plan)`);
-const env = checkEnvironment();
-if (!env.ok) fail(env.error);
+// Local machine only: a cloud session or container is refused; a missing / unsupported opencode or a
+// missing credential only warns — the run itself will fail with a clearer error, and install.sh fixes it.
+const cloud = cloudSignal();
+if (cloud) fail(cloud);
+const envCheck = checkEnvironment();
+if (!envCheck.ok) console.error(`warning: ${envCheck.error}`);
 readLimits(); // surface a corrupt limits.json once, before the run records anything
 
 try {
@@ -213,10 +224,36 @@ child.on('close', (code) => {
   if (intIgnored) summary.errors.push('ignored SIGINT');
   if (stoppedBy) summary.errors.push(`stopped by ${stoppedBy}`);
   if (code === 0 && !summary.sessionID) summary.ok = false;
+  // Rate limit / quota: record when the model comes back so oc-rank skips it until then. The reset is
+  // parsed from the message or estimated from the plan (lib.mjs); the same hit feeds the oc-limits.mjs
+  // re-probe backoff, so one record carries both the block time and the schedule.
+  const limitText = [...summary.errors, err].join('\n');
+  const limited = LIMIT_RE.test(limitText);
+  let limitNow = null;
+  if (limited) {
+    limitNow = new Date();
+    const prev = readLimits()[opts.model];
+    const prevAt = prev?.at ? new Date(prev.at).getTime() : NaN;
+    const hits = Number.isNaN(prevAt) || limitNow.getTime() - prevAt > 24 * 3600e3 ? 1 : (Number(prev.hits) || 0) + 1;
+    const parsed = parseReset(limitText, limitNow);
+    const est = parsed ? { until: parsed, source: 'message' } : estimateReset(opts.model, hits, limitNow, limitText);
+    summary.limited = {
+      until: est.until ? est.until.toISOString() : null,
+      source: est.source,
+      message: limitText.trim(),
+    };
+    summary.ok = false;
+  }
   // Bookkeeping is best-effort: a read-only HOME must not lose the run's result.
   try {
-    if (summary.rateLimited) recordHit(opts.model, summary.limit.message);
-    else if (summary.ok) recordSuccess(opts.model);
+    if (summary.limited) {
+      recordHit(opts.model, summary.limit?.message || summary.limited.message, limitNow,
+        { until: summary.limited.until, source: summary.limited.source });
+    } else if (summary.rateLimited) {
+      recordHit(opts.model, summary.limit.message);
+    } else if (summary.ok) {
+      recordSuccess(opts.model);
+    }
   } catch (e) {
     summary.errors.push(`limits write failed: ${e.message}`);
   }

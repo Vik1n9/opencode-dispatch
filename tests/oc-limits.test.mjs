@@ -22,7 +22,7 @@ function recordHit(sb, id, now) {
 }
 
 const readJson = (path) => JSON.parse(readFileSync(path, 'utf8'));
-const entry = (sb, id = 'opencode/a') => readJson(limitsPath(sb)).models[id];
+const entry = (sb, id = 'opencode/a') => readJson(limitsPath(sb))[id];
 
 const T0 = '2026-10-19T00:00:00.000Z';
 const HOUR = 60 * 60 * 1000;
@@ -80,7 +80,7 @@ test('oc-limits: clear removes one model and reports it', (t) => {
   const r = runScript(sb, 'oc-limits.mjs', ['clear', 'opencode/a']);
   assert.equal(r.status, 0);
   assert.equal(r.stdout.trim(), 'cleared opencode/a');
-  assert.deepEqual(Object.keys(readJson(limitsPath(sb)).models), ['opencode/b']);
+  assert.deepEqual(Object.keys(readJson(limitsPath(sb))), ['opencode/b']);
 
   const rest = status(sb, ['--json']);
   assert.deepEqual(Object.keys(rest.json.models), ['opencode/b']);

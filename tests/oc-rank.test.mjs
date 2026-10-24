@@ -6,18 +6,28 @@ import { makeSandbox, runScript, writeShim, writeJson, configDir, SHIM_OK } from
 const CAT = 'repo-coding';
 const BENCH = 'SWE-bench Verified';
 
-// Synthetic score table: one category, one benchmark unless stated.
+// Synthetic score table: one category, one benchmark unless stated. Internal scores live in the derived
+// internal.json (data layout: benchmarks.json + internal.json), so table() stashes any `internal` fixture
+// keyed by the returned table and setup() writes it to the sandbox's internal.json.
+const INTERNALS = new WeakMap();
 function table(models, { benchmarks = [BENCH], category = CAT } = {}) {
-  return {
+  const t = {
     categories: { [category]: { label: 'Fix bugs', benchmarks } },
     models: Object.fromEntries(models.map((m) => [m.key, {
       name: m.name ?? m.key,
       aliases: m.aliases,
       scores: Object.fromEntries(Object.entries(m.scores ?? {}).map(([b, value]) => [b, { value, source: 'vendor' }])),
-      ...(m.internal ? { internal: m.internal } : {}),
       ...(m.stealth ? { stealth: true } : {}),
     }])),
   };
+  const ints = models.filter((m) => m.internal);
+  if (ints.length) {
+    INTERNALS.set(t, {
+      generated: '2026-10-19T00:00:00.000Z',
+      models: Object.fromEntries(ints.map((m) => [m.key, m.internal])),
+    });
+  }
+  return t;
 }
 
 function cache(models) {
@@ -41,6 +51,8 @@ function setup(t, { scores, inventory, category = CAT }) {
   const cachePath = join(sb.dir, 'inventory.json');
   writeJson(scoresPath, scores);
   writeJson(cachePath, inventory);
+  const internal = INTERNALS.get(scores);
+  if (internal) writeJson(join(configDir(sb), 'internal.json'), internal);
   const rank = (extra = []) => runScript(sb, 'oc-rank.mjs',
     ['--cache', cachePath, '--task', category, '--scores', scoresPath, ...extra], { env: SHIM_OK });
   return { sb, scoresPath, cachePath, rank };
@@ -52,15 +64,19 @@ const json = (r) => {
 };
 
 const limitsPath = (sb) => join(configDir(sb), 'limits.json');
-const pause = (sb, ...ids) => writeJson(limitsPath(sb), {
-  models: Object.fromEntries(ids.map((id) => [id, {
-    hitAt: '2026-10-19T00:00:00.000Z',
-    message: 'Rate limit exceeded.',
-    probes: 0,
-    lastProbe: '2026-10-19T00:00:00.000Z',
-    nextProbe: '2099-01-01T00:00:00.000Z',
-  }])),
-});
+// Flat limits.json record (the lib.mjs format is the single source of truth): a re-probe pause carries
+// until/source plus the oc-limits.mjs schedule fields.
+const pause = (sb, ...ids) => writeJson(limitsPath(sb), Object.fromEntries(ids.map((id) => [id, {
+  until: null,
+  source: 'probe',
+  message: 'Rate limit exceeded.',
+  hits: 1,
+  at: '2026-10-19T00:00:00.000Z',
+  hitAt: '2026-10-19T00:00:00.000Z',
+  probes: 0,
+  lastProbe: '2026-10-19T00:00:00.000Z',
+  nextProbe: '2099-01-01T00:00:00.000Z',
+}])));
 
 test('oc-rank: capability first — a clearly weaker token-plan model is never picked', (t) => {
   const { rank } = setup(t, {
@@ -110,7 +126,7 @@ test('oc-rank: a token-plan model more than 10 points behind is not used', (t) =
   assert.ok(!r.results[0].trail.some((x) => /Qwen token plan/.test(x)));
 });
 
-test('oc-rank: among models within 5 points the fastest wins, even over a cheaper plan', (t) => {
+test('oc-rank: without task speed, a slower free entry beats a faster Go entry (plan decides)', (t) => {
   const { rank } = setup(t, {
     scores: table([
       { key: 'fast-go', aliases: ['opencode-go/fast'], scores: { [BENCH]: 80 } },
@@ -122,10 +138,10 @@ test('oc-rank: among models within 5 points the fastest wins, even over a cheape
     ]),
   });
   const r = json(rank(['--json']));
-  assert.equal(r.results[0].pick, 'opencode-go/fast');
+  assert.equal(r.results[0].pick, 'opencode/slow-free');
 });
 
-test('oc-rank: within 30% counts as equally fast, then free beats Go', (t) => {
+test('oc-rank: without task speed, the plan decides and free beats Go', (t) => {
   const { rank } = setup(t, {
     scores: table([
       { key: 'go', aliases: ['opencode-go/a'], scores: { [BENCH]: 80 } },
@@ -138,10 +154,10 @@ test('oc-rank: within 30% counts as equally fast, then free beats Go', (t) => {
   });
   const r = json(rank(['--json']));
   assert.equal(r.results[0].pick, 'opencode/b-free');
-  assert.ok(r.results[0].trail.some((x) => /similar speed: cheaper plan/.test(x)));
+  assert.ok(r.results[0].trail.some((x) => /chosen by plan \(free first\)/.test(x)));
 });
 
-test('oc-rank: within 30% counts as equally fast, then Go beats pay-as-you-go', (t) => {
+test('oc-rank: without task speed, Go beats pay-as-you-go by plan order', (t) => {
   const { rank } = setup(t, {
     scores: table([
       { key: 'paid', aliases: ['deepseek/paid'], scores: { [BENCH]: 80 } },
@@ -322,7 +338,7 @@ test('oc-rank: shadow holds stealth models once at the cheapest plan; unknown mo
   const text = rank();
   assert.equal(text.status, 0);
   assert.match(text.stdout, /shadow-run candidates .*opencode\/stealth-free \(context 400k\)/);
-  assert.match(text.stdout, /not in the score table yet .*opencode\/unknown-free \(context 128k\)/);
+  assert.match(text.stdout, /not in the benchmark table yet .*opencode\/unknown-free \(context 128k\)/);
 });
 
 test('oc-rank: bad input files and options exit 2 with one lower-case line', (t) => {
@@ -493,7 +509,7 @@ test('oc-rank: CLOSE boundary — rule 4 keeps pay-as-you-go when the nearest fr
   assert.equal(json(rank(['--json'])).results[0].pick, 'deepseek/paid');
 });
 
-test('oc-rank: SPEED_EQUAL latency — a 1.25x difference is equally fast, so the cheaper plan wins', (t) => {
+test('oc-rank: without task speed, a 1.25x slower free entry still wins (plan decides)', (t) => {
   const { rank } = setup(t, {
     scores: table([
       { key: 'free', aliases: ['opencode/free'], scores: { [BENCH]: 80 } },
@@ -507,7 +523,7 @@ test('oc-rank: SPEED_EQUAL latency — a 1.25x difference is equally fast, so th
   assert.equal(json(rank(['--json'])).results[0].pick, 'opencode/free');
 });
 
-test('oc-rank: SPEED_EQUAL latency — a 1.4x difference wins on speed regardless of plan', (t) => {
+test('oc-rank: without task speed, a 1.4x slower free entry still wins (latency does not outrank the plan)', (t) => {
   const { rank } = setup(t, {
     scores: table([
       { key: 'free', aliases: ['opencode/free'], scores: { [BENCH]: 80 } },
@@ -518,7 +534,7 @@ test('oc-rank: SPEED_EQUAL latency — a 1.4x difference wins on speed regardles
       { id: 'opencode-go/go', seconds: 10 },
     ]),
   });
-  assert.equal(json(rank(['--json'])).results[0].pick, 'opencode-go/go');
+  assert.equal(json(rank(['--json'])).results[0].pick, 'opencode/free');
 });
 
 test('oc-rank: SPEED_EQUAL task speed — a 1.25x difference is equally fast, so the cheaper plan wins', (t) => {
@@ -629,7 +645,7 @@ test('oc-rank: a missing limits.json and an empty one give byte-identical output
   assert.equal(beforeJson.status, 0, beforeJson.stderr);
   assert.equal(beforeText.status, 0, beforeText.stderr);
 
-  writeJson(limitsPath(sb), { models: {} });
+  writeJson(limitsPath(sb), {});
   const afterJson = rank(['--json']);
   const afterText = rank();
   assert.equal(afterJson.stdout, beforeJson.stdout);
