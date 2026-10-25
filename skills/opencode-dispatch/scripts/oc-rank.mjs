@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-import { existsSync, readFileSync } from 'node:fs';
-import { pathToFileURL } from 'node:url';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { exitIfVersion, BENCHMARKS, CACHE, CACHE_MAX_AGE_H, blockedUntil, loadInternal, plan, loadBenchmarks, loadLimits } from './lib.mjs';
 import { due, paused, readLimits } from './oc-limits.mjs';
 
@@ -406,4 +406,4 @@ if (argv.includes('--json')) {
 
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main();
+if (process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))) main();
