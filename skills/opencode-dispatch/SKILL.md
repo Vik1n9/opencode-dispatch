@@ -66,7 +66,7 @@ Three dimensions: **correctness** (deductions for returns, major / minor defects
 
 ## Usage limits and resuming
 
-Live watchdog: `oc-run` watches JSONL; with `--stall <min>` (default 10, 0 disables) a run with no new event for that long stops with `ok:false` and `stalled:{minutes}` (exit 1), and `--fallback <m,...>|default --task <cat>` hands off to the next allowed model in the same session (`-s <sessionID>`), re-ranking each handoff. `default` follows the allocation rules from `oc-rank` (minus the failed model; on a limit, also drops models sharing its allowance). Handoffs are recorded in `handoffs[]`.
+Live watchdog: `oc-run` watches JSONL; with `--stall <min>` (default 10, 0 disables) a run idle that long stops with `ok:false` and `stalled:{minutes}` (exit 1), and `--fallback <m,...>|default --task <cat>` hands off to the next allowed model in the same session (`-s <sessionID>`), re-ranking each handoff. `default` follows the allocation rules from `oc-rank` (minus the failed model; on a limit, also drops models sharing its allowance). Handoffs are recorded in `handoffs[]`.
 
 `oc-run` detects rate-limit / quota errors: summary `limited: { until, source, message }`, model blocked in `limits.json` until then (`oc-rank` skips it; success clears it). `until` is parsed from the error (Retry-After, "try again in …", reset time) or estimated by consecutive hits: Zen free 15 min → 1 h → 5 h; Go 1 h → 5 h → 24 h; Qwen from TokenBar; pay-as-you-go without balance = `no-reset` (ask the user to top up). On `limited`, keep the worktree as is, then:
 - `until` within ~20 min: wait (background `sleep` or the loop's wakeup), continue the same `--session`, same model.
