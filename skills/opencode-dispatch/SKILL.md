@@ -31,7 +31,7 @@ Scripts: `node ~/.agents/skills/opencode-dispatch/scripts/<name>`. Each file hea
 | `oc-rank.mjs --task <category>` | Pick + reasoning, shadow candidates, blocked models (`--min-context <tokens>`, `--no-free`). Categories: `repo-coding` `terminal` `greenfield` `tools` `gui-vision` `reasoning` `security` `instruction` `long-context` `all` |
 | `oc-quota.mjs` | DeepSeek balance, Qwen token plan (TokenBar), active limit blocks |
 | `oc-limits.mjs status` | Free-limit pauses, `DUE` re-probes; `clear <id>` lifts one |
-| `oc-run.mjs --model <id> --dir <dir> --title <t> "<task>"` | One run → JSON summary (`ok`, `sessionID`, `seconds`, `steps`, `tokens`, `cost`, `errors`, `limited`, `log`); `--session`, `--fork`, `--agent plan`, `--prompt-file`. Never read the log whole |
+| `oc-run.mjs --model <id> --dir <dir> --title <t> "<task>"` | One run → JSON summary (`ok`, `sessionID`, `seconds`, `steps`, `tokens`, `cost`, `errors`, `limited`, `log`, `stalled`, `handoffs`, `segments`); `--session`, `--fork`, `--agent plan`, `--prompt-file`, `--stall <min>` (default 10, 0 disables), `--fallback <m,...>|default --task <cat>`. Never read the log whole |
 | `oc-track.mjs add --json '<record>'` | Record a reviewed run; also `show`, `compare --task-id`, `recompute`, `grade` |
 | `oc-bench.mjs lint` | Check `benchmarks.json`; `add-model`, `add-alias`, `set-score` edit it safely |
 
@@ -65,6 +65,8 @@ Every usable `stealth` model `oc-rank` lists runs the formal task alongside (sam
 Three dimensions: **correctness** (deductions for returns, major / minor defects, scope, failed rerun; `failed` caps 40), **quality** (0–100, Claude's judgment beyond defects: 90+ mergeable as-is, 75–89 good, 60–74 mediocre, 40–59 needs rework), **speed** (`speedRatio` vs the fastest passing run of the same `taskId`; `speedComparable: false` when timing is unfair). `grade` = ½ correctness + ½ quality; internal score = mean of the last 10 by date. Only the model's own faults count — not spec ambiguity, interruptions or environment. Major = breaks production, loses data, weakens security, or violates the spec.
 
 ## Usage limits and resuming
+
+Live watchdog: `oc-run` watches the JSONL stream; with `--stall <min>` (default 10, 0 disables) a run with no new event for that long stops with `ok:false` and `stalled:{minutes}` (exit 1), and `--fallback <m,...>|default --task <cat>` hands off to the next allowed model in the same session (`-s <sessionID>`), re-ranking each handoff. `default` follows the allocation rules from `oc-rank` (minus the failed model; on a limit, also drops models sharing its allowance). Handoffs are recorded in `handoffs[]`.
 
 `oc-run` detects rate-limit / quota errors: summary `limited: { until, source, message }`, model blocked in `limits.json` until then (`oc-rank` skips it; success clears it). `until` is parsed from the error (Retry-After, "try again in …", reset time) or estimated by consecutive hits: Zen free 15 min → 1 h → 5 h; Go 1 h → 5 h → 24 h; Qwen from TokenBar; pay-as-you-go without balance = `no-reset` (ask the user to top up). On `limited`, keep the worktree as is, then:
 - `until` within ~20 min: wait (background `sleep` or the loop's wakeup), continue the same `--session`, same model.

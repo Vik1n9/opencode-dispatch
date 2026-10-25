@@ -1,43 +1,18 @@
 #!/usr/bin/env node
-// Run one opencode task non-interactively and print a compact summary.
-// Wraps `opencode run --format json`, closing stdin (opencode waits on stdin
-// forever when it is not a TTY) and saving the raw JSONL event log to a file.
-// opencode runs in its own process group, so signals sent to the caller's group
-// never reach it. oc-run ignores SIGINT; `kill <oc-run pid>` (SIGTERM) stops the
-// run cleanly. The `trap '' INT` wrapper is no longer needed.
-//
-// Usage:
-//   node oc-run.mjs --model <provider/model> [--agent build|plan] [--dir <path>]
-//                   [--session <id>] [--fork] [--title <t>] [--log <file>]
-//                   [--prompt-file <file> | <message...>]
-//
-// Prints JSON: { ok, exitCode, sessionID, rateLimited, limit, title, agent, model, dir, seconds,
-//                text, tools[], steps, cost, tokens, errors[], log, limited? }
-//   rateLimited is true when an error event, a failed tool or stderr shows a quota / rate-limit
-//   failure (provider.quota, status 429, FreeUsageLimitError, "rate limit exceeded");
-//   limit then holds { type, message } (message <= 200 chars), otherwise null. ok stays false.
-//
-// When the error text looks like a rate limit / quota ("rate limit", "429", "insufficient balance" …),
-// the reset time is parsed from the message or estimated from the plan, the entry is written to
-// limits.json (so oc-rank skips the model), and `limited: { until, source, message }` is added while
-// ok stays false. The same hit also records the per-model re-probe pause (oc-limits.mjs backoff);
-// a successful run clears the model's entry.
-//
-// Exit codes: 0 run ok, 1 run failed (summary.ok is false), 2 bad arguments or
-// a cloud session / container. A missing or unsupported opencode only warns (oc-check.mjs reports it).
-
 import { spawn } from 'node:child_process';
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { exitIfVersion, LIMIT_RE, estimateReset, parseReset } from './lib.mjs';
+import { exitIfVersion, LIMIT_RE, estimateReset, parseReset, CACHE, blockedUntil } from './lib.mjs';
 import { checkEnvironment, cloudSignal } from './oc-check.mjs';
 import { recordHit, recordSuccess, readLimits } from './oc-limits.mjs';
+import { rankCandidates } from './oc-rank.mjs';
+import { allowance } from './oc-quota.mjs';
 
 exitIfVersion();
 
 const argv = process.argv.slice(2);
-const opts = { fork: false, agent: 'build', dir: process.cwd() };
+const opts = { fork: false, agent: 'build', dir: process.cwd(), stall: '10' };
 const words = [];
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
@@ -55,6 +30,10 @@ for (let i = 0; i < argv.length; i++) {
   else if (a === '--fork') opts.fork = true;
   else if (a === '--title') opts.title = next();
   else if (a === '--log') opts.log = resolve(next());
+  else if (a === '--stall') opts.stall = next();
+  else if (a === '--fallback') opts.fallback = next();
+  else if (a === '--task') opts.task = next();
+  else if (a === '--cache') opts.cache = resolve(next());
   else if (a === '--prompt-file') {
     const file = next();
     try { opts.prompt = readFileSync(file, 'utf8'); }
@@ -72,13 +51,20 @@ if (!opts.model) fail('--model is required (provider/model, see `opencode models
 if (!opts.prompt.trim()) fail('empty prompt');
 if (opts.fork && !opts.session) fail('--fork needs --session');
 if (opts.agent !== 'build' && opts.agent !== 'plan') fail(`unknown agent: ${opts.agent} (expected build or plan)`);
-// Local machine only: a cloud session or container is refused; a missing / unsupported opencode or a
-// missing credential only warns — the run itself will fail with a clearer error, and install.sh fixes it.
+if (!/^\d+$/.test(opts.stall)) fail('--stall must be a non-negative integer');
+if (opts.fallback) {
+  if (opts.fallback === 'default') {
+    if (!opts.task) fail('--fallback default requires --task');
+  } else {
+    const parts = opts.fallback.split(',');
+    if (parts.some((p) => p.trim() === '')) fail('empty fallback entry');
+  }
+}
 const cloud = cloudSignal();
 if (cloud) fail(cloud);
 const envCheck = checkEnvironment();
 if (!envCheck.ok) console.error(`warning: ${envCheck.error}`);
-readLimits(); // surface a corrupt limits.json once, before the run records anything
+readLimits();
 
 try {
   if (!opts.log) {
@@ -92,16 +78,8 @@ try {
   fail(`cannot open log file: ${e.message}`);
 }
 
-const args = ['run', '--format', 'json', '-m', opts.model, '--agent', opts.agent];
-if (opts.session) args.push('-s', opts.session);
-if (opts.fork) args.push('--fork');
-if (opts.title) args.push('--title', opts.title);
-args.push(opts.prompt);
-
 const LIMIT_TEXT = /freeusagelimiterror|rate limit exceeded/i;
 const LIMIT_EVENT = /"status"\s*:\s*429\b|"type"\s*:\s*"provider\.quota"/;
-// Return { type, message } for a quota / rate-limit failure, or null; value may be an event
-// error object, a failed tool's error, or raw stderr text.
 function rateLimit(value) {
   const raw = typeof value === 'string' ? value : JSON.stringify(value ?? '');
   const hit = LIMIT_TEXT.test(raw) || LIMIT_EVENT.test(raw) || value?.type === 'provider.quota' || value?.status === 429;
@@ -115,65 +93,44 @@ function rateLimit(value) {
   return { type: String(e.type ?? e.status ?? 'rate limit'), message: String(message).slice(0, 200) };
 }
 
-const started = Date.now();
-// opencode picks its project from $PWD, not the process cwd, so set both
-const child = spawn('opencode', args, {
-  cwd: opts.dir,
-  env: { ...process.env, PWD: opts.dir },
-  stdio: ['ignore', 'pipe', 'pipe'],
-  detached: true,
-});
-let out = '';
-let err = '';
-let logError = null;
-let closed = false;
-let stoppedBy = null;
-let intIgnored = false;
-let killTimer = null;
+function isLimitEvent(ev) {
+  if (!ev || typeof ev !== 'object') return false;
+  if (ev.type === 'error') {
+    const msg = ev.error?.message ?? ev.message ?? JSON.stringify(ev.error ?? ev);
+    if (LIMIT_RE.test(String(msg))) return true;
+    return rateLimit(ev.error ?? ev) !== null;
+  }
+  const p = ev.part ?? {};
+  if (ev.type === 'tool_use' && p.state?.status === 'error') {
+    const msg = p.state?.error ?? '';
+    if (LIMIT_RE.test(String(msg))) return true;
+    return rateLimit(p.state?.error) !== null;
+  }
+  return false;
+}
 
-const killGroup = (signal) => {
-  if (!child.pid) return;
-  try { process.kill(-child.pid, signal); } catch {}
-};
+const stallMinutes = Number(opts.stall);
+const stallThresholdMs = process.env.OC_RUN_STALL_MS ? Number(process.env.OC_RUN_STALL_MS) : stallMinutes * 60000;
 
-// A group SIGINT must neither kill the run nor orphan opencode, so ignore it.
-process.on('SIGINT', () => { intIgnored = true; });
-const stop = (signal) => {
-  if (closed || stoppedBy) return;
-  stoppedBy = signal;
-  killGroup('SIGTERM');
-  killTimer = setTimeout(() => killGroup('SIGKILL'), 10_000);
-};
-process.on('SIGTERM', () => stop('SIGTERM'));
-process.on('SIGHUP', () => stop('SIGHUP'));
-// Never leave an orphan behind if oc-run exits for any other reason.
-process.on('exit', () => { if (!closed) killGroup('SIGKILL'); });
-// Stream events to the log as they arrive so a long run can be watched (tail -f / read the log).
-// A log write must never orphan the child or lose collected output.
-child.stdout.on('data', (d) => {
-  out += d;
-  if (logError) return;
-  try { appendFileSync(opts.log, d); }
-  catch (e) { logError = e; }
-});
-child.stderr.on('data', (d) => (err += d));
-child.on('error', (e) => {
-  if (!closed) killGroup('SIGTERM');
-  fail(`cannot start opencode: ${e.message}`);
-});
-child.on('close', (code) => {
-  closed = true;
-  if (killTimer) clearTimeout(killTimer);
+let intIgnoredFlag = false;
+let activeChild = null;
+let activeTriggerStop = null;
 
+process.on('SIGINT', () => { intIgnoredFlag = true; });
+process.on('SIGTERM', () => { if (activeTriggerStop) activeTriggerStop(); });
+process.on('SIGHUP', () => { if (activeTriggerStop) activeTriggerStop(); });
+process.on('exit', () => { if (activeChild?.pid) { try { process.kill(-activeChild.pid, 'SIGKILL'); } catch {} } });
+
+function buildSummary(model, code, stdout, stderr, started, sessionID, stoppedBy, logErr, stalledFlag) {
   const summary = {
     ok: code === 0 && !stoppedBy,
     exitCode: code,
-    sessionID: null,
+    sessionID: sessionID ?? null,
     rateLimited: false,
     limit: null,
     title: opts.title ?? null,
     agent: opts.agent,
-    model: opts.model,
+    model,
     dir: opts.dir,
     seconds: Math.round((Date.now() - started) / 100) / 10,
     text: '',
@@ -185,7 +142,7 @@ child.on('close', (code) => {
     log: opts.log,
   };
   const texts = [];
-  for (const line of out.split('\n')) {
+  for (const line of stdout.split('\n')) {
     if (!line.trim()) continue;
     let ev;
     try { ev = JSON.parse(line); } catch { continue; }
@@ -209,54 +166,282 @@ child.on('close', (code) => {
       summary.limit ??= rateLimit(ev.error ?? ev);
     }
   }
-  // The final answer is the last text part; earlier ones are interim narration.
   summary.text = texts.at(-1) ?? '';
   summary.cost = Math.round(summary.cost * 1e6) / 1e6;
-  if (err.trim()) {
-    summary.errors.push(`stderr: ${err.trim().slice(0, 500)}`);
-    summary.limit ??= rateLimit(err.trim());
+  if (stderr.trim()) {
+    summary.errors.push(`stderr: ${stderr.trim().slice(0, 500)}`);
+    summary.limit ??= rateLimit(stderr.trim());
   }
   if (summary.limit) {
     summary.rateLimited = true;
-    summary.ok = false; // a quota failure never counts as a usable run
-  }
-  if (logError) summary.errors.push(`log write failed: ${logError.message}`);
-  if (intIgnored) summary.errors.push('ignored SIGINT');
-  if (stoppedBy) summary.errors.push(`stopped by ${stoppedBy}`);
-  if (code === 0 && !summary.sessionID) summary.ok = false;
-  // Rate limit / quota: record when the model comes back so oc-rank skips it until then. The reset is
-  // parsed from the message or estimated from the plan (lib.mjs); the same hit feeds the oc-limits.mjs
-  // re-probe backoff, so one record carries both the block time and the schedule.
-  const limitText = [...summary.errors, err].join('\n');
-  const limited = LIMIT_RE.test(limitText);
-  let limitNow = null;
-  if (limited) {
-    limitNow = new Date();
-    const prev = readLimits()[opts.model];
-    const prevAt = prev?.at ? new Date(prev.at).getTime() : NaN;
-    const hits = Number.isNaN(prevAt) || limitNow.getTime() - prevAt > 24 * 3600e3 ? 1 : (Number(prev.hits) || 0) + 1;
-    const parsed = parseReset(limitText, limitNow);
-    const est = parsed ? { until: parsed, source: 'message' } : estimateReset(opts.model, hits, limitNow, limitText);
-    summary.limited = {
-      until: est.until ? est.until.toISOString() : null,
-      source: est.source,
-      message: limitText.trim(),
-    };
     summary.ok = false;
   }
-  // Bookkeeping is best-effort: a read-only HOME must not lose the run's result.
+  if (logErr) summary.errors.push(`log write failed: ${logErr.message}`);
+  if (stoppedBy) summary.errors.push(`stopped by ${stoppedBy}`);
+  if (code === 0 && !summary.sessionID) summary.ok = false;
+  if (!summary.sessionID && sessionID) summary.sessionID = sessionID;
+  if (stalledFlag) summary.stalled = { minutes: stallMinutes };
+  return summary;
+}
+
+async function runSegment(model, prompt, session, isFirst) {
+  const segStarted = Date.now();
+  const args = ['run', '--format', 'json', '-m', model, '--agent', opts.agent];
+  if (session) args.push('-s', session);
+  if (isFirst && opts.fork) args.push('--fork');
+  if (isFirst && opts.title) args.push('--title', opts.title);
+  args.push(prompt);
+
+  const child = spawn('opencode', args, {
+    cwd: opts.dir,
+    env: { ...process.env, PWD: opts.dir },
+    stdio: ['ignore', 'pipe', 'pipe'],
+    detached: true,
+  });
+  activeChild = child;
+
+  let stdout = '';
+  let stderr = '';
+  let closed = false;
+  let stoppedBy = null;
+  let liveLimit = false;
+  let stalled = false;
+  let lastEvent = Date.now();
+  let sessionID = session;
+  let killTimer = null;
+  let stallTimer = null;
+  let lineBuf = '';
+  let logErr = null;
+
+  const killGroup = (signal) => {
+    if (!child.pid) return;
+    try { process.kill(-child.pid, signal); } catch {}
+  };
+  const triggerStop = () => {
+    if (closed || stoppedBy) return;
+    stoppedBy = 'SIGTERM';
+    killGroup('SIGTERM');
+    killTimer = setTimeout(() => killGroup('SIGKILL'), 5000);
+  };
+  activeTriggerStop = triggerStop;
+
+  const exitPromise = new Promise((resolve) => {
+    child.on('close', (code, signal) => {
+      closed = true;
+      if (killTimer) clearTimeout(killTimer);
+      resolve({ code: code ?? (signal ? 1 : 0), signal });
+    });
+  });
+
+  child.stdout.on('data', (d) => {
+    stdout += d;
+    lastEvent = Date.now();
+    if (!logErr) { try { appendFileSync(opts.log, d); } catch (e) { logErr = e; } }
+    lineBuf += d.toString();
+    let idx;
+    while ((idx = lineBuf.indexOf('\n')) >= 0) {
+      const line = lineBuf.slice(0, idx);
+      lineBuf = lineBuf.slice(idx + 1);
+      if (!line.trim()) continue;
+      let ev;
+      try { ev = JSON.parse(line); } catch { continue; }
+      lastEvent = Date.now();
+      if (ev.sessionID) sessionID = ev.sessionID;
+      if (isLimitEvent(ev)) { liveLimit = true; triggerStop(); }
+    }
+  });
+  child.stderr.on('data', (d) => {
+    stderr += d;
+    if (LIMIT_RE.test(d.toString())) { liveLimit = true; triggerStop(); }
+  });
+  child.on('error', (e) => {
+    if (!closed) killGroup('SIGTERM');
+    fail(`cannot start opencode: ${e.message}`);
+  });
+
+  if (stallMinutes > 0 && stallThresholdMs > 0) {
+    stallTimer = setInterval(() => {
+      if (closed || liveLimit || stalled || stoppedBy) return;
+      if (Date.now() - lastEvent >= stallThresholdMs) {
+        stalled = true;
+        triggerStop();
+      }
+    }, 50);
+  }
+
+  const { code } = await exitPromise;
+  if (stallTimer) clearInterval(stallTimer);
+  if (killTimer) clearTimeout(killTimer);
+
+  const summary = buildSummary(model, code, stdout, stderr, segStarted, sessionID, stoppedBy, logErr, stalled);
   try {
+    const limitText = [...summary.errors, stderr].join('\n');
+    const limited = LIMIT_RE.test(limitText);
+    let limitNow = null;
+    if (limited) {
+      limitNow = new Date();
+      const prev = readLimits()[model];
+      const prevAt = prev?.at ? new Date(prev.at).getTime() : NaN;
+      const hits = Number.isNaN(prevAt) || limitNow.getTime() - prevAt > 24 * 3600e3 ? 1 : (Number(prev.hits) || 0) + 1;
+      const parsed = parseReset(limitText, limitNow);
+      const est = parsed ? { until: parsed, source: 'message' } : estimateReset(model, hits, limitNow, limitText);
+      summary.limited = {
+        until: est.until ? est.until.toISOString() : null,
+        source: est.source,
+        message: limitText.trim(),
+      };
+      summary.ok = false;
+      summary.rateLimited = summary.rateLimited || true;
+    }
     if (summary.limited) {
-      recordHit(opts.model, summary.limit?.message || summary.limited.message, limitNow,
+      recordHit(model, summary.limit?.message || summary.limited.message, limitNow,
         { until: summary.limited.until, source: summary.limited.source });
     } else if (summary.rateLimited) {
-      recordHit(opts.model, summary.limit.message);
+      recordHit(model, summary.limit?.message || 'rate limited');
     } else if (summary.ok) {
-      recordSuccess(opts.model);
+      recordSuccess(model);
     }
   } catch (e) {
     summary.errors.push(`limits write failed: ${e.message}`);
   }
-  console.log(JSON.stringify(summary, null, 2));
-  process.exit(summary.ok ? 0 : 1);
-});
+  if (logErr) summary.errors.push(`log write failed: ${logErr.message}`);
+  if (stalled) summary.stalled = { minutes: stallMinutes };
+
+  activeTriggerStop = null;
+  activeChild = null;
+  return { summary, sessionID, ok: summary.ok, stalled, liveLimit, limited: summary.limited, rateLimited: summary.rateLimited };
+}
+
+const warnings = [];
+function resolveCandidates(reason, failedModel) {
+  let ids = [];
+  if (opts.fallback === 'default') {
+    try {
+      const cachePath = opts.cache || CACHE;
+      const cache = JSON.parse(readFileSync(cachePath, 'utf8'));
+      ids = rankCandidates(cache, opts.task, {});
+    } catch (e) {
+      ids = [];
+    }
+  } else if (opts.fallback) {
+    ids = opts.fallback.split(',').map((s) => s.trim());
+  } else {
+    return [];
+  }
+  ids = ids.filter((id) => id !== failedModel);
+  if (opts.fallback === 'default' && reason === 'limit') {
+    let prefix = null;
+    if (failedModel.startsWith('opencode-go/')) prefix = 'opencode-go/';
+    else if (failedModel.startsWith('bailian-token-plan-personal/')) prefix = 'bailian-token-plan-personal/';
+    else if (failedModel.startsWith('deepseek/')) prefix = 'deepseek/';
+    if (prefix) ids = ids.filter((id) => !id.startsWith(prefix));
+  }
+  const filtered = [];
+  for (const id of ids) {
+    let blocked = null;
+    try { blocked = blockedUntil(id); } catch {}
+    if (blocked) continue;
+    const a = allowance(id);
+    if (!a.allowed) continue;
+    if (a.warning) warnings.push(a.warning);
+    filtered.push(id);
+  }
+  return filtered;
+}
+
+let currentModel = opts.model;
+let currentSession = opts.session;
+let currentPrompt = opts.prompt;
+let isFirst = true;
+let handoffs = [];
+let segments = [];
+let totalSeconds = 0;
+let totalSteps = 0;
+let totalCost = 0;
+let totalTokens = { input: 0, output: 0, reasoning: 0 };
+let allTools = [];
+let allErrors = [];
+let finalOk = false;
+let finalExitCode = 1;
+let finalModel = currentModel;
+let finalLimited = null;
+let finalStalled = null;
+let finalRateLimited = false;
+let finalLimit = null;
+let finalText = '';
+let finalSession = currentSession;
+
+while (true) {
+  const segResult = await runSegment(currentModel, currentPrompt, currentSession, isFirst);
+  isFirst = false;
+  const seg = segResult.summary;
+  segments.push(seg);
+  totalSeconds = Math.round((totalSeconds + (seg.seconds || 0)) * 10) / 10;
+  totalSteps += seg.steps || 0;
+  totalCost += seg.cost || 0;
+  for (const k of ['input', 'output', 'reasoning']) totalTokens[k] += seg.tokens?.[k] ?? 0;
+  allTools = allTools.concat(seg.tools || []);
+  allErrors = allErrors.concat(seg.errors || []);
+  finalText = seg.text || finalText;
+  finalSession = seg.sessionID || finalSession;
+  finalModel = currentModel;
+  finalRateLimited = !!seg.rateLimited;
+  finalLimit = seg.limit;
+  if (seg.limited) finalLimited = seg.limited;
+  if (seg.stalled) finalStalled = seg.stalled;
+
+  if (seg.ok) {
+    finalOk = true;
+    finalExitCode = 0;
+    break;
+  }
+
+  const reason = seg.stalled ? 'stall' : (seg.limited || seg.rateLimited) ? 'limit' : null;
+  if (!reason) {
+    finalOk = false;
+    finalExitCode = seg.exitCode || 1;
+    break;
+  }
+
+  const candidates = resolveCandidates(reason, currentModel);
+  if (!candidates.length) {
+    finalOk = false;
+    finalExitCode = 1;
+    break;
+  }
+  const next = candidates[0];
+  const whyText = reason === 'limit' ? 'hit a usage limit' : `stalled for ${stallMinutes} minutes`;
+  const message = `The previous model (${currentModel}) ${whyText}. Continue from the existing changes in this folder; do not start over. Original task follows: ${opts.prompt}`;
+  handoffs.push({ from: currentModel, to: next, reason, at: new Date().toISOString(), message });
+  currentModel = next;
+  currentSession = finalSession;
+  currentPrompt = message;
+}
+
+const summary = {
+  ok: finalOk,
+  exitCode: finalExitCode,
+  sessionID: finalSession ?? null,
+  rateLimited: finalRateLimited,
+  limit: finalLimit,
+  title: opts.title ?? null,
+  agent: opts.agent,
+  model: finalModel,
+  dir: opts.dir,
+  seconds: totalSeconds,
+  text: finalText,
+  tools: allTools,
+  steps: totalSteps,
+  cost: Math.round(totalCost * 1e6) / 1e6,
+  tokens: totalTokens,
+  errors: allErrors,
+  log: opts.log,
+  handoffs,
+  segments,
+  warnings,
+};
+if (finalLimited) summary.limited = finalLimited;
+if (finalStalled) summary.stalled = finalStalled;
+if (intIgnoredFlag) summary.errors.push('ignored SIGINT');
+console.log(JSON.stringify(summary, null, 2));
+process.exit(summary.ok ? 0 : 1);
