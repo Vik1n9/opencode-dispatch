@@ -46,7 +46,7 @@ cd opencode-dispatch
 ./install.sh
 ```
 
-`install.sh` first runs `scripts/oc-check.mjs`: in a cloud session / container or on opencode other than 2.x it stops (exit 1) before linking anything; a missing opencode or no logged-in provider only prints a warning and the install continues. It then symlinks `skills/opencode-dispatch` into `~/.agents/skills/` (and `~/.claude/skills/` if missing) and `config/scores.json` into `~/.config/opencode-dispatch/`. Anything already in the way is moved to `~/.config/opencode-dispatch/backups/<timestamp>/`. Because the score table is a symlink, internal scores written by `oc-track.mjs` show up as changes in this repository.
+`install.sh` first runs `scripts/oc-check.mjs`: in a cloud session / container or on opencode other than 2.x it stops (exit 1) before linking anything; a missing opencode or no logged-in provider only prints a warning and the install continues. It then symlinks `skills/opencode-dispatch` into `~/.agents/skills/` (and `~/.claude/skills/` if missing) and `config/benchmarks.json` into `~/.config/opencode-dispatch/`. Anything already in the way is moved to `~/.config/opencode-dispatch/backups/<timestamp>/`. Because `benchmarks.json` is a symlink, edits made with `oc-bench.mjs` show up as changes in this repository; the internal scores derived by `oc-track.mjs` are written to `internal.json`, which stays in `~/.config/opencode-dispatch/` and is never linked.
 
 ## Quick start
 
