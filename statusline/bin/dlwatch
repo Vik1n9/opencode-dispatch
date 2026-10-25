@@ -1,0 +1,351 @@
+#!/usr/bin/env node
+// Run a download command and publish its progress for the status line.
+//   dlwatch [--no-pty] <label> -- <command> [args...]
+// Runs the command under a PTY by default so tools print progress; parses the
+// last "NN.N%" and an ETA from stdout/stderr, passes output through, and writes
+// ~/.cache/agent-status/dl-<pid>.json. Without an ETA, finish time is extrapolated.
+import { spawn, spawnSync } from 'node:child_process';
+import { mkdirSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
+
+const THROTTLE = 500;
+const TAIL = 256;
+
+let state = null;
+let started = 0;
+let file = null;
+let dir = null;
+let tail = '';
+let lastWrite = 0;
+let pendingTimer = null;
+let child = null;
+let isBrew = false;
+let brewCache = null;
+let brewTimer = null;
+let brewFile = null;
+let brewFileSeenAt = 0;
+let brewFileSeenSize = 0;
+let currentBrewUrl = null;
+let totalBytes = null;
+let lastOutputPctAt = 0;
+let lastBrewUpdate = 0;
+let sawOutput100 = false;
+
+function hasScript() {
+  try { return spawnSync('sh', ['-c', 'command -v script'], { encoding: 'utf8' }).status === 0; }
+  catch { return false; }
+}
+
+function shellQuote(s) {
+  return `'${String(s).replace(/'/g, "'\\''")}'`;
+}
+
+function stripAnsi(s) {
+  return String(s)
+    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '')
+    .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '')
+    .replace(/\x04/g, '');
+}
+
+function isBrewCommand(cmd, args) {
+  const base = String(cmd).split('/').pop();
+  if (base !== 'brew') return false;
+  return (args || []).some((a) => ['fetch', 'install', 'reinstall', 'upgrade'].includes(String(a)));
+}
+
+function brewCacheDir() {
+  if (process.env.DLWATCH_BREW_CACHE) return process.env.DLWATCH_BREW_CACHE;
+  try {
+    const r = spawnSync('brew', ['--cache'], { encoding: 'utf8', timeout: 5000 });
+    if (r.status === 0 && r.stdout.trim()) return r.stdout.trim();
+  } catch { /* fall back */ }
+  return join(homedir(), 'Library', 'Caches', 'Homebrew');
+}
+
+async function fetchBrewTotal(url) {
+  try {
+    const res = await fetch(url, { method: 'HEAD', redirect: 'follow', signal: AbortSignal.timeout(10000) });
+    const cl = res.headers.get('content-length');
+    if (cl) { totalBytes = Number(cl); return; }
+  } catch { /* try range */ }
+  try {
+    const res = await fetch(url, { method: 'GET', headers: { Range: 'bytes=0-0' }, redirect: 'follow', signal: AbortSignal.timeout(10000) });
+    const cr = res.headers.get('content-range');
+    const m = cr && cr.match(/\/(\d+)\s*$/);
+    if (m) { totalBytes = Number(m[1]); return; }
+  } catch { /* unknown */ }
+  totalBytes = null;
+}
+
+function brewTick() {
+  if (!isBrew || !state || totalBytes == null) return;
+  const now = Date.now();
+  if (now - lastOutputPctAt < 2000) return;
+  const downloadsDir = join(brewCache, 'downloads');
+  let files = [];
+  try {
+    files = readdirSync(downloadsDir)
+      .filter((n) => n.endsWith('.incomplete'))
+      .map((n) => {
+        const p = join(downloadsDir, n);
+        const st = statSync(p);
+        return { p, mtime: st.mtimeMs, birth: (st.birthtimeMs || st.mtimeMs), size: st.size };
+      })
+      .filter((f) => (f.birth || f.mtime) >= started - 1000);
+  } catch { return; }
+  if (!files.length) return;
+  files.sort((a, b) => (b.mtime - a.mtime) || (b.size - a.size));
+  const f = files[0];
+  if (brewFile !== f.p) {
+    brewFile = f.p;
+    brewFileSeenAt = now;
+    brewFileSeenSize = f.size;
+  }
+  const elapsed = Math.max(0.001, (now - brewFileSeenAt) / 1000);
+  const grown = f.size - brewFileSeenSize;
+  let rate = grown / elapsed;
+  if (rate <= 0) rate = f.size / Math.max(0.001, (now - started) / 1000);
+  let pct = (f.size / totalBytes) * 100;
+  if (!sawOutput100 && pct > 99.9) pct = 99.9;
+  if (pct < 0) pct = 0;
+  state.pct = pct;
+  if (rate > 0 && f.size < totalBytes) state.etaAt = now + ((totalBytes - f.size) / rate) * 1000;
+  lastBrewUpdate = now;
+  publish();
+}
+
+function cleanForScan(s) {
+  return stripAnsi(s).replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+}
+
+function etaToSeconds(s) {
+  s = String(s).trim();
+  if (/^\d+(?::\d{1,2})+$/.test(s)) {
+    const p = s.split(':').map(Number);
+    if (p.length === 3) return p[0] * 3600 + p[1] * 60 + p[2];
+    if (p.length === 2) return p[0] * 60 + p[1];
+    return p[0];
+  }
+  let total = 0;
+  for (const m of s.matchAll(/(\d+)\s*([hms])/gi)) {
+    const n = Number(m[1]);
+    if (m[2].toLowerCase() === 'h') total += n * 3600;
+    else if (m[2].toLowerCase() === 'm') total += n * 60;
+    else total += n;
+  }
+  return total || null;
+}
+
+const PCT_RE = /(\d{1,3}(?:\.\d+)?)%(?=[ \t]*(?:of|\[|\(|eta|\r|\n|$))/gi;
+const ETA_RE = /\b(?:eta)\s+(\d+(?::\d{1,2})+|(?:\d+\s*[hms]\s*)+)/gi;
+
+function parseProgress(text) {
+  const pctMatches = [...String(text).matchAll(PCT_RE)].map((m) => Number(m[1])).filter((n) => n <= 100);
+  if (!pctMatches.length) return { pct: null, etaSec: null };
+  const pct = pctMatches.at(-1);
+  const etaMatches = [...String(text).matchAll(ETA_RE)];
+  const lastEta = etaMatches.length ? etaMatches.at(-1)[1] : null;
+  const etaSec = lastEta ? etaToSeconds(lastEta) : null;
+  return { pct, etaSec };
+}
+
+function writeNow() {
+  try { writeFileSync(file + '.tmp', JSON.stringify(state)); renameSync(file + '.tmp', file); } catch { /* best effort */ }
+}
+
+function publish(force = false) {
+  const now = Date.now();
+  if (force || now - lastWrite >= THROTTLE) {
+    if (pendingTimer) { clearTimeout(pendingTimer); pendingTimer = null; }
+    lastWrite = now;
+    writeNow();
+  } else if (!pendingTimer) {
+    pendingTimer = setTimeout(() => {
+      pendingTimer = null;
+      lastWrite = Date.now();
+      writeNow();
+    }, THROTTLE - (now - lastWrite));
+    if (pendingTimer.unref) pendingTimer.unref();
+  }
+}
+
+function cleanup() {
+  if (brewTimer) { clearInterval(brewTimer); brewTimer = null; }
+  if (pendingTimer) { clearTimeout(pendingTimer); pendingTimer = null; }
+  try { rmSync(file, { force: true }); } catch { /* ignore */ }
+  try { rmSync(file + '.tmp', { force: true }); } catch { /* ignore */ }
+}
+
+function scan(chunk) {
+  if (!state) return;
+  const raw = typeof chunk === 'string' ? chunk : chunk.toString();
+  if (isBrew) {
+    const scanText = tail + stripAnsi(raw);
+    for (const m of scanText.matchAll(/==>\s*Downloading\s+(\S+)/g)) {
+      const url = m[1];
+      if (url !== currentBrewUrl) {
+        currentBrewUrl = url;
+        fetchBrewTotal(url);
+      }
+    }
+  }
+  const text = tail + cleanForScan(raw);
+  const { pct, etaSec } = parseProgress(text);
+  if (pct != null) {
+    lastOutputPctAt = Date.now();
+    state.pct = pct;
+    if (pct >= 100) sawOutput100 = true;
+    if (etaSec != null) state.etaAt = Date.now() + etaSec * 1000;
+    else if (state.pct > 0 && state.pct < 100) state.etaAt = Date.now() + ((Date.now() - started) * (100 - state.pct)) / state.pct;
+    publish();
+  }
+  tail = text.slice(-TAIL);
+}
+
+function main() {
+  const argv = process.argv.slice(2);
+  let noPty = false;
+  let rest = argv;
+  if (rest[0] === '--no-pty') { noPty = true; rest = rest.slice(1); }
+  const sep = rest.indexOf('--');
+  if (sep < 1 || sep === rest.length - 1) {
+    console.error('usage: dlwatch [--no-pty] <label> -- <command> [args...]');
+    process.exit(2);
+  }
+  const label = rest.slice(0, sep).join(' ');
+  const [cmd, ...args] = rest.slice(sep + 1);
+
+  dir = join(homedir(), '.cache', 'agent-status');
+  mkdirSync(dir, { recursive: true });
+  file = join(dir, `dl-${process.pid}.json`);
+  started = Date.now();
+  state = { label, pid: process.pid, pct: null, etaAt: null, started };
+  tail = '';
+  lastWrite = 0;
+  pendingTimer = null;
+  isBrew = isBrewCommand(cmd, args);
+  brewCache = isBrew ? brewCacheDir() : null;
+  brewFile = null;
+  brewFileSeenAt = 0;
+  brewFileSeenSize = 0;
+  currentBrewUrl = null;
+  totalBytes = null;
+  lastOutputPctAt = 0;
+  lastBrewUpdate = 0;
+  sawOutput100 = false;
+  if (brewTimer) { clearInterval(brewTimer); brewTimer = null; }
+
+  const env = { ...process.env };
+  if (env.HOMEBREW_DOWNLOAD_CONCURRENCY === undefined) env.HOMEBREW_DOWNLOAD_CONCURRENCY = '1';
+
+  const usePty = !noPty && hasScript();
+  let spawnCmd, spawnArgs;
+  if (usePty) {
+    if (process.platform === 'darwin') {
+      spawnCmd = 'script';
+      spawnArgs = ['-q', '/dev/null', cmd, ...args];
+    } else {
+      spawnCmd = 'script';
+      spawnArgs = ['-qefc', [cmd, ...args].map(shellQuote).join(' '), '/dev/null'];
+    }
+  } else {
+    spawnCmd = cmd;
+    spawnArgs = args;
+  }
+
+  const stdinMode = (usePty ? (process.stdin.isTTY ? 'inherit' : 'ignore') : 'inherit');
+  publish(true);
+  if (isBrew) brewTimer = setInterval(brewTick, 500);
+
+  let stdoutBuf = '';
+  let stderrBuf = '';
+  child = spawn(spawnCmd, spawnArgs, { stdio: [stdinMode, 'pipe', 'pipe'], env, detached: true });
+
+  child.stdout.on('data', (d) => {
+    const raw = d.toString();
+    if (process.stdout.isTTY) process.stdout.write(d);
+    else {
+      stdoutBuf += stripAnsi(raw).replace(/\r\n/g, '\n');
+      let idx;
+      while ((idx = stdoutBuf.indexOf('\n')) >= 0) {
+        const line = stdoutBuf.slice(0, idx);
+        stdoutBuf = stdoutBuf.slice(idx + 1);
+        const emit = line.includes('\r') ? line.slice(line.lastIndexOf('\r') + 1) : line;
+        process.stdout.write(emit + '\n');
+      }
+    }
+    scan(raw);
+  });
+  child.stderr.on('data', (d) => {
+    const raw = d.toString();
+    if (process.stdout.isTTY) process.stderr.write(d);
+    else {
+      stderrBuf += stripAnsi(raw).replace(/\r\n/g, '\n');
+      let idx;
+      while ((idx = stderrBuf.indexOf('\n')) >= 0) {
+        const line = stderrBuf.slice(0, idx);
+        stderrBuf = stderrBuf.slice(idx + 1);
+        const emit = line.includes('\r') ? line.slice(line.lastIndexOf('\r') + 1) : line;
+        process.stderr.write(emit + '\n');
+      }
+    }
+    scan(raw);
+  });
+
+  const killGroup = (sig) => {
+    try {
+      if (child && child.pid) process.kill(-child.pid, sig);
+      else if (child) child.kill(sig);
+    } catch {
+      try { if (child) child.kill(sig); } catch { /* ignore */ }
+    }
+  };
+  for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+    process.on(sig, () => { killGroup(sig); });
+  }
+  child.on('error', (e) => {
+    // Fall back to direct spawn if script vanished at exec time.
+    if (usePty) {
+      child = spawn(cmd, args, { stdio: [stdinMode, 'pipe', 'pipe'], env, detached: true });
+      child.stdout.on('data', (d) => { process.stdout.write(d); scan(d); });
+      child.stderr.on('data', (d) => { process.stderr.write(d); scan(d); });
+      child.on('close', (code, signal) => { cleanup(); process.exit(code ?? (signal ? 1 : 0)); });
+      return;
+    }
+    console.error(`dlwatch: ${e.message}`);
+    cleanup();
+    process.exit(127);
+  });
+  child.on('close', (code, signal) => {
+    if (!process.stdout.isTTY) {
+      if (stdoutBuf) {
+        const emit = stdoutBuf.includes('\r') ? stdoutBuf.slice(stdoutBuf.lastIndexOf('\r') + 1) : stdoutBuf;
+        process.stdout.write(emit);
+      }
+      if (stderrBuf) {
+        const emit = stderrBuf.includes('\r') ? stderrBuf.slice(stderrBuf.lastIndexOf('\r') + 1) : stderrBuf;
+        process.stderr.write(emit);
+      }
+    }
+    cleanup();
+    process.exit(code ?? (signal ? 1 : 0));
+  });
+}
+
+export { etaToSeconds, parseProgress, scan, publish, cleanup as _cleanup, main, stripAnsi, cleanForScan };
+
+export function createScanner() {
+  let t = '';
+  return {
+    push(chunk) {
+      const text = t + cleanForScan(typeof chunk === 'string' ? chunk : chunk.toString());
+      const r = parseProgress(text);
+      t = text.slice(-TAIL);
+      return r;
+    },
+  };
+}
+
+if (import.meta.url === pathToFileURL(process.argv[1] || '').href) main();

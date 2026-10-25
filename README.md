@@ -21,8 +21,9 @@ The full operating rules for Claude are in [`skills/opencode-dispatch/SKILL.md`]
 ```
 skills/opencode-dispatch/   the skill (SKILL.md + scripts/)
 config/benchmarks.json      curated table: external benchmarks per model version, task categories
-install.sh                  links the skill and benchmark table into place
+install.sh                  links the skill and benchmark table into place (--statusline: also the status line)
 tests/                      node:test suite (node --test tests/)
+statusline/                 optional companion Claude Code status line (see below)
 ```
 
 Personal data stays out of the repository, in `~/.config/opencode-dispatch/` (override with `OC_DISPATCH_HOME`): `track.jsonl` (raw dispatch history), `internal.json` (scores derived from it) and `limits.json` (usage-limit blocks).
@@ -47,6 +48,24 @@ cd opencode-dispatch
 ```
 
 `install.sh` first runs `scripts/oc-check.mjs`: in a cloud session / container or on opencode other than 2.x it stops (exit 1) before linking anything; a missing opencode or no logged-in provider only prints a warning and the install continues. It then symlinks `skills/opencode-dispatch` into `~/.agents/skills/` (and `~/.claude/skills/` if missing) and `config/benchmarks.json` into `~/.config/opencode-dispatch/`. Anything already in the way is moved to `~/.config/opencode-dispatch/backups/<timestamp>/`. Because `benchmarks.json` is a symlink, edits made with `oc-bench.mjs` show up as changes in this repository; the internal scores derived by `oc-track.mjs` are written to `internal.json`, which stays in `~/.config/opencode-dispatch/` and is never linked.
+
+### Optional: companion status line
+
+```bash
+./install.sh --statusline
+```
+
+Adds a second status line row in Claude Code that shows what is running, and only appears when something is:
+
+```
+⚙ 錄製清單 qwen3.8-max 12m·21步 │ ⏳ 狀態列測試 1m │ ⬇ 參考影片 45% 預計19:18
+```
+
+- `⚙` running opencode dispatches (`oc-run.mjs` processes): the `--title` label (use a short label, e.g. 4–6 CJK characters), model, elapsed time and steps from the run log.
+- `⏳` Claude Code background work of the current session (background Bash, subagents), parsed incrementally from the transcript.
+- `⬇` downloads started through `~/.claude/bin/dlwatch <label> -- <command>`: percent and estimated finish time. dlwatch runs the command under a pseudo-terminal so tools print progress (yt-dlp, curl, wget, git), and for Homebrew, which holds its progress back, it reads the size of the growing download against the URL's content length.
+
+`--statusline` links `statusline/` files into `~/.claude/` and points `settings.json` `statusLine` at `statusline-wrap.sh` with `refreshInterval: 3`, after a backup. Your first line stays: `~/.claude/statusline.sh` if present, otherwise the previous `statusLine` command, saved to `~/.config/opencode-dispatch/statusline-base`. Tests: `cd statusline && node --test test/ test/wrap/ test/dlwatch/` (temp `HOME`, fake processes, no network).
 
 ## Quick start
 
