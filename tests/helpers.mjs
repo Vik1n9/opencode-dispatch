@@ -15,8 +15,10 @@ export const rankScript = join(SCRIPTS, 'oc-rank.mjs');
 // The scripts refuse cloud sessions and containers; tests must not inherit the caller's markers.
 // OC_DISPATCH_HOME / OC_DISPATCH_CACHE are stripped too: every test points them at its own temp folder,
 // and an inherited value would redirect the scripts into the caller's data (or the suite's .testhome).
+// REX_* is stripped so oc-run never opens a real Rex tab from a test run inside Rex.
 const CLOUD_VARS = ['CLAUDE_CODE_REMOTE', 'CODESPACES', 'REMOTE_CONTAINERS', 'GITPOD_WORKSPACE_ID',
-  'DEVCONTAINER', 'KUBERNETES_SERVICE_HOST', 'container', 'OC_DISPATCH_HOME', 'OC_DISPATCH_CACHE'];
+  'DEVCONTAINER', 'KUBERNETES_SERVICE_HOST', 'container', 'OC_DISPATCH_HOME', 'OC_DISPATCH_CACHE',
+  'REX_SESSION', 'REX_BLOCK', 'REX_SERVER', 'REX_CLIENT'];
 
 export function cleanEnv() {
   const env = { ...process.env };

@@ -14,15 +14,15 @@ Claude is the manager, opencode the worker. Claude cuts tasks, writes specs, pic
 
 !`node ${CLAUDE_SKILL_DIR}/scripts/oc-check.mjs`
 
-If that line does not start with `ok` (it may show the command itself or `[shell command execution disabled by policy]`), do not use this skill: tell the user why and work without opencode. Never work around it with a direct `opencode run` or by installing / logging in to opencode yourself. Local only: cloud sessions, containers / devcontainers / Codespaces, or opencode missing / not 2.x (tested 2.0.32) / not logged in are refused — `ok …` (exit 0), `blocked …` (exit 1), `missing …` (exit 3), one retry on a cold-start timeout. `oc-run.mjs` and `oc-models.mjs` repeat the check.
+If that line does not start with `ok` (it may show the command itself or `[shell command execution disabled by policy]`), do not use this skill: tell the user why and work without opencode. Never work around it (direct `opencode run`, installing / logging in yourself). Local only: cloud sessions, containers / devcontainers / Codespaces, or opencode missing / not 2.x (tested 2.0.32) / not logged in are refused — `ok …` (exit 0), `blocked …` (exit 1), `missing …` (exit 3), one retry on a cold-start timeout. `oc-run.mjs` and `oc-models.mjs` repeat the check.
 
 ## Dispatch mode (on by default)
 
-Once loaded and the environment check passed, dispatch mode stays on for every later task in the session (user, 2026-10-19): dispatch implementation work without being asked again, until the user explicitly says to stop; off lasts until they turn it back on.
+After a passing check, dispatch mode stays on for the session (user, 2026-10-19): dispatch implementation work unasked until the user says stop; off lasts until they turn it back on.
 
 ## Scripts and data
 
-Scripts: `node ~/.agents/skills/opencode-dispatch/scripts/<name>`. Each file header documents its options and formats — read it only when you need a detail. `--version` on any script prints the installed version.
+Scripts: `node ~/.agents/skills/opencode-dispatch/scripts/<name>`. Headers document options and formats — read only for a detail. `--version` prints the installed version.
 
 | Script | Does |
 |---|---|
@@ -32,6 +32,7 @@ Scripts: `node ~/.agents/skills/opencode-dispatch/scripts/<name>`. Each file hea
 | `oc-quota.mjs` | DeepSeek balance, Qwen token plan (TokenBar), active limit blocks |
 | `oc-limits.mjs status` | Free-limit pauses, `DUE` re-probes; `clear <id>` lifts one |
 | `oc-run.mjs --model <id> --dir <dir> --title <t> "<task>"` | One run → JSON summary (`ok`, `sessionID`, `seconds`, `steps`, `tokens`, `cost`, `errors`, `limited`, `log`, `stalled`, `handoffs`, `segments`); `--session`, `--fork`, `--agent plan`, `--prompt-file`, `--stall <min>` (default 10, 0 disables), `--fallback <m,...>|default --task <cat>`. Never read the log whole |
+| `oc-watch.mjs <log>` | Live run view + final commits / diff. In Rex (`REX_SESSION`) `oc-run` opens it in a background tab itself (`--no-rex` off); tab ids on stderr and in `rex` |
 | `oc-track.mjs add --json '<record>'` | Record a reviewed run; also `show`, `compare --task-id`, `recompute`, `grade` |
 | `oc-bench.mjs lint` | Check `benchmarks.json`; `add-model`, `add-alias`, `set-score` edit it safely |
 
@@ -43,10 +44,10 @@ Data `~/.config/opencode-dispatch/` (`$OC_DISPATCH_HOME` for sandboxes): `benchm
 2. **Rank**: `oc-rank.mjs --task <category>`. Models missing from `benchmarks.json` are listed last; add them with `oc-bench.mjs` (benchmark name with version, independent beats vendor; none found → `--stealth`) when one is a plausible pick or the user asks — not on every start.
 3. **Allowance** (user, 2026-10-19): `oc-quota.mjs`. DeepSeek `low` (< $1) or Qwen `low` (< 10 %) → next model in the ranking; Qwen `unknown` → ask the user to glance at TokenBar before sending a lot, note "Qwen allowance not confirmed"; data older than 60 min is `stale` — use it, mention it. Zen free needs no check but is rate-limited.
 4. **Cut the task**: one task does one thing. opencode cannot see this conversation: give the background, allowed / forbidden files, definition of done (tests, one commit), what the report must contain. Long specs via `--prompt-file`. Every spec carries the Safety lines below.
-5. **Dispatch** in a branch or worktree. Long tasks: Bash `run_in_background: true` (`oc-run.mjs` ignores SIGINT itself); you are notified — do not poll. Parallel runs each get their own `--dir`; never two `build` runs on the same files. Progress: tail of the log, `git log` in the worktree.
+5. **Dispatch** in a branch or worktree. Long tasks: Bash `run_in_background: true`; you are notified — do not poll. Parallel runs each get their own `--dir`; never two `build` runs on the same files. Progress: `rex capture -s <session> -b <block> --trim` (Rex tab), else log tail.
 6. **Review** every report as a claim, not evidence: `git diff` yourself (scope creep, forbidden files, loosened tests), run the tests yourself, tick off the definition of done, check that live data and the main checkout are untouched.
 7. **Return** what falls short to the same `--session`: file:line, why, direction, this round's done. Claude does not fix it for the model; it takes over only if the user asks or several returns fail — and says why.
-8. **Record** every reviewed run (formal and shadow) with `oc-track.mjs add`, then **wrap up**: rounds, problems and fixes, returns and why, model, `oc-rank` reasoning, total `cost`. Ask before merging, pushing or deploying.
+8. **Record** every reviewed run (formal and shadow) with `oc-track.mjs add`, close its Rex tab (`rex window close`), then **wrap up**: rounds, problems and fixes, returns and why, model, `oc-rank` reasoning, total `cost`. Ask before merging, pushing or deploying.
 
 ## Allocation rules (implemented in `oc-rank.mjs`)
 
@@ -60,7 +61,7 @@ Defaults, not hard rules (user, 2026-10-19): a model the user names is used with
 
 Every usable `stealth` model `oc-rank` lists runs the formal task alongside (same spec, same `taskId`) when: context fits; isolated from the same base (own worktree, branch, port); no external effects and done verifiable locally; not a small read-only query. Otherwise say which failed. Same review, record, never merge (better than formal → ask about switching); delete the worktree, keep the branch. `oc-track.mjs compare --task-id <id>` shows runs side by side. Anonymous models have no external benchmarks — shadow runs are their only way to build internal scores.
 
-## Grading (`oc-track.mjs` header has the full field list)
+## Grading (fields: `oc-track.mjs` header)
 
 Three dimensions: **correctness** (deductions for returns, major / minor defects, scope, failed rerun; `failed` caps 40), **quality** (0–100, Claude's judgment beyond defects: 90+ mergeable as-is, 75–89 good, 60–74 mediocre, 40–59 needs rework), **speed** (`speedRatio` vs the fastest passing run of the same `taskId`; `speedComparable: false` when timing is unfair). `grade` = ½ correctness + ½ quality; internal score = mean of the last 10 by date. Only the model's own faults count — not spec ambiguity, interruptions or environment. Major = breaks production, loses data, weakens security, or violates the spec.
 
@@ -84,4 +85,4 @@ Live watchdog: `oc-run` watches JSONL; with `--stall <min>` (default 10, 0 disab
 - **Sensitive content never goes to a model under data-collection terms**: personal, customer, non-public business or financial data, or anything called confidential → only models the official Zen / Go privacy tables list as no training and 0-day retention (check each session — they change); if none fits, ask first.
 - Never put secrets in task descriptions (opencode stores sessions and sends them to providers). `~/.config/opencode/opencode.json` holds API keys in plain text — filter key / token / secret fields when reading it.
 
-Also: `opencode session list -n 20 --format json` (in the project), `opencode session export <id>`, `opencode service status` (web UI).
+Also: `opencode session list -n 20 --format json` (in project), `opencode session export <id>`.

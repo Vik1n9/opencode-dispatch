@@ -1,8 +1,9 @@
 #!/usr/bin/env node
-import { spawn } from 'node:child_process';
-import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { spawn, spawnSync } from 'node:child_process';
+import { appendFileSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { exitIfVersion, LIMIT_RE, estimateReset, parseReset, CACHE, blockedUntil } from './lib.mjs';
 import { checkEnvironment, cloudSignal } from './oc-check.mjs';
 import { recordHit, recordSuccess, readLimits } from './oc-limits.mjs';
@@ -12,7 +13,7 @@ import { allowance } from './oc-quota.mjs';
 exitIfVersion();
 
 const argv = process.argv.slice(2);
-const opts = { fork: false, agent: 'build', dir: process.cwd(), stall: '10' };
+const opts = { fork: false, agent: 'build', dir: process.cwd(), stall: '10', rex: true };
 const words = [];
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
@@ -34,6 +35,7 @@ for (let i = 0; i < argv.length; i++) {
   else if (a === '--fallback') opts.fallback = next();
   else if (a === '--task') opts.task = next();
   else if (a === '--cache') opts.cache = resolve(next());
+  else if (a === '--no-rex') opts.rex = false;
   else if (a === '--prompt-file') {
     const file = next();
     try { opts.prompt = readFileSync(file, 'utf8'); }
@@ -76,6 +78,47 @@ try {
   writeFileSync(opts.log, '');
 } catch (e) {
   fail(`cannot open log file: ${e.message}`);
+}
+
+// <log>.status.json lets oc-watch.mjs follow the run: model per segment, handoffs, final summary.
+const statusFile = `${opts.log}.status.json`;
+const status = {
+  state: 'running', pid: process.pid, title: opts.title ?? null, model: opts.model, agent: opts.agent,
+  dir: opts.dir, base: null, segment: 0, handoffs: [], summary: null,
+};
+try {
+  const head = spawnSync('git', ['-C', opts.dir, 'rev-parse', 'HEAD'], { encoding: 'utf8', timeout: 5000 });
+  if (head.status === 0) status.base = head.stdout.trim();
+} catch {}
+function writeStatus(patch) {
+  Object.assign(status, patch);
+  try {
+    writeFileSync(`${statusFile}.tmp`, JSON.stringify(status, null, 2));
+    renameSync(`${statusFile}.tmp`, statusFile);
+  } catch {}
+}
+writeStatus({});
+
+// Inside Rex (REX_SESSION set), open a background tab running oc-watch.mjs on this run's log, so the user
+// and Claude can watch progress and the final diff there (`rex capture -s <session> -b <block>`). The tab's
+// ids go to stderr right away (a background caller sees them before the summary) and to summary.rex.
+// A missing or failing `rex` never stops the run; the reason goes to summary.rex.error.
+let rex = null;
+if (opts.rex && process.env.REX_SESSION) {
+  const label = `oc ${opts.title ?? opts.model.split('/').pop()}`;
+  const watcher = fileURLToPath(new URL('./oc-watch.mjs', import.meta.url));
+  const r = spawnSync('rex', ['window', 'new', '-s', process.env.REX_SESSION, label, '-c', opts.dir,
+    '--keep-open', '--focus=false', '--shell=none', '--json', '--', process.execPath, watcher, opts.log],
+  { encoding: 'utf8', timeout: 15000 });
+  try {
+    if (r.error) throw r.error;
+    if (r.status !== 0) throw new Error((r.stderr || r.stdout || `exit ${r.status}`).trim().slice(0, 300));
+    const out = JSON.parse(r.stdout);
+    rex = { session: process.env.REX_SESSION, window: out.window_id ?? null, block: out.block_ids?.[0] ?? null };
+    console.error(`oc-run: rex tab "${label}" window ${rex.window} block ${rex.block}`);
+  } catch (e) {
+    rex = { error: `rex tab not opened: ${e.message}` };
+  }
 }
 
 const LIMIT_TEXT = /freeusagelimiterror|rate limit exceeded/i;
@@ -372,6 +415,7 @@ let finalText = '';
 let finalSession = currentSession;
 
 while (true) {
+  writeStatus({ model: currentModel, segment: segments.length + 1, handoffs });
   const segResult = await runSegment(currentModel, currentPrompt, currentSession, isFirst);
   isFirst = false;
   const seg = segResult.summary;
@@ -443,5 +487,7 @@ const summary = {
 if (finalLimited) summary.limited = finalLimited;
 if (finalStalled) summary.stalled = finalStalled;
 if (intIgnoredFlag) summary.errors.push('ignored SIGINT');
+if (rex) summary.rex = rex;
+writeStatus({ state: 'done', model: finalModel, handoffs, summary });
 console.log(JSON.stringify(summary, null, 2));
 process.exit(summary.ok ? 0 : 1);

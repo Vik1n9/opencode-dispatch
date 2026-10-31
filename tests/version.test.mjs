@@ -6,7 +6,7 @@ import test from 'node:test';
 import { repo, tempHome } from './helpers.mjs';
 
 const version = readFileSync(join(repo, 'skills/opencode-dispatch/VERSION'), 'utf8').trim();
-const scripts = ['oc-bench', 'oc-models', 'oc-quota', 'oc-rank', 'oc-run', 'oc-track'];
+const scripts = ['oc-bench', 'oc-models', 'oc-quota', 'oc-rank', 'oc-run', 'oc-track', 'oc-watch'];
 
 test('VERSION is a semantic version', () => {
   assert.match(version, /^\d+\.\d+\.\d+$/);
