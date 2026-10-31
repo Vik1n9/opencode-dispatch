@@ -12,6 +12,9 @@ import { allowance } from './oc-quota.mjs';
 
 exitIfVersion();
 
+// Set once the log exists; a fail() after that also marks the status file done, so oc-watch shows the error.
+let status = null;
+
 const argv = process.argv.slice(2);
 const opts = { fork: false, agent: 'build', dir: process.cwd(), stall: '10', rex: true };
 const words = [];
@@ -46,6 +49,12 @@ for (let i = 0; i < argv.length; i++) {
 if (!opts.prompt) opts.prompt = words.join(' ');
 
 function fail(msg) {
+  if (status) {
+    writeStatus({ state: 'done', summary: {
+      ok: false, exitCode: 2, error: msg, errors: [msg], model: status.model, sessionID: null,
+      seconds: Math.round(process.uptime() * 10) / 10, steps: 0, cost: 0, handoffs: status.handoffs,
+    } });
+  }
   console.log(JSON.stringify({ ok: false, error: msg }));
   process.exit(2);
 }
@@ -81,14 +90,19 @@ try {
 }
 
 // <log>.status.json lets oc-watch.mjs follow the run: model per segment, handoffs, final summary.
+// `base` (HEAD at start) and `dirty` (uncommitted changes at start) let it tell what the run changed.
 const statusFile = `${opts.log}.status.json`;
-const status = {
+status = {
   state: 'running', pid: process.pid, title: opts.title ?? null, model: opts.model, agent: opts.agent,
-  dir: opts.dir, base: null, segment: 0, handoffs: [], summary: null,
+  dir: opts.dir, base: null, dirty: false, segment: 0, handoffs: [], summary: null,
 };
 try {
   const head = spawnSync('git', ['-C', opts.dir, 'rev-parse', 'HEAD'], { encoding: 'utf8', timeout: 5000 });
-  if (head.status === 0) status.base = head.stdout.trim();
+  if (head.status === 0) {
+    status.base = head.stdout.trim();
+    const st = spawnSync('git', ['-C', opts.dir, 'status', '--porcelain'], { encoding: 'utf8', timeout: 5000 });
+    status.dirty = st.status === 0 && st.stdout.trim() !== '';
+  }
 } catch {}
 function writeStatus(patch) {
   Object.assign(status, patch);
@@ -102,15 +116,18 @@ writeStatus({});
 // Inside Rex (REX_SESSION set), open a background tab running oc-watch.mjs on this run's log, so the user
 // and Claude can watch progress and the final diff there (`rex capture -s <session> -b <block>`). The tab's
 // ids go to stderr right away (a background caller sees them before the summary) and to summary.rex.
-// A missing or failing `rex` never stops the run; the reason goes to summary.rex.error.
+// A missing, failing or slow (> 5 s) `rex` never stops the run; the reason goes to summary.rex.error.
 let rex = null;
 if (opts.rex && process.env.REX_SESSION) {
   const label = `oc ${opts.title ?? opts.model.split('/').pop()}`;
   const watcher = fileURLToPath(new URL('./oc-watch.mjs', import.meta.url));
   const r = spawnSync('rex', ['window', 'new', '-s', process.env.REX_SESSION, label, '-c', opts.dir,
     '--keep-open', '--focus=false', '--shell=none', '--json', '--', process.execPath, watcher, opts.log],
-  { encoding: 'utf8', timeout: 15000 });
+  { encoding: 'utf8', timeout: 5000 });
   try {
+    if (r.error?.code === 'ETIMEDOUT') {
+      throw new Error(`rex timed out after 5 s; the tab may exist without ids (rex window ls, label "${label}")`);
+    }
     if (r.error) throw r.error;
     if (r.status !== 0) throw new Error((r.stderr || r.stdout || `exit ${r.status}`).trim().slice(0, 300));
     const out = JSON.parse(r.stdout);

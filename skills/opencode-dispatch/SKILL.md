@@ -32,7 +32,7 @@ Scripts: `node ~/.agents/skills/opencode-dispatch/scripts/<name>`. Headers docum
 | `oc-quota.mjs` | DeepSeek balance, Qwen token plan (TokenBar), active limit blocks |
 | `oc-limits.mjs status` | Free-limit pauses, `DUE` re-probes; `clear <id>` lifts one |
 | `oc-run.mjs --model <id> --dir <dir> --title <t> "<task>"` | One run → JSON summary (`ok`, `sessionID`, `seconds`, `steps`, `tokens`, `cost`, `errors`, `limited`, `log`, `stalled`, `handoffs`, `segments`); `--session`, `--fork`, `--agent plan`, `--prompt-file`, `--stall <min>` (default 10, 0 disables), `--fallback <m,...>|default --task <cat>`. Never read the log whole |
-| `oc-watch.mjs <log>` | Live run view + final commits / diff. In Rex (`REX_SESSION`) `oc-run` opens it in a background tab itself (`--no-rex` off); tab ids on stderr and in `rex` |
+| `oc-watch.mjs <log>` | Live run view + final commits / diff. In Rex (`REX_SESSION`) `oc-run` opens it in a background tab; `--no-rex` disables. Ids: stderr at start, summary `rex` |
 | `oc-track.mjs add --json '<record>'` | Record a reviewed run; also `show`, `compare --task-id`, `recompute`, `grade` |
 | `oc-bench.mjs lint` | Check `benchmarks.json`; `add-model`, `add-alias`, `set-score` edit it safely |
 
@@ -47,7 +47,7 @@ Data `~/.config/opencode-dispatch/` (`$OC_DISPATCH_HOME` for sandboxes): `benchm
 5. **Dispatch** in a branch or worktree. Long tasks: Bash `run_in_background: true`; you are notified — do not poll. Parallel runs each get their own `--dir`; never two `build` runs on the same files. Progress: `rex capture -s <session> -b <block> --trim` (Rex tab), else log tail.
 6. **Review** every report as a claim, not evidence: `git diff` yourself (scope creep, forbidden files, loosened tests), run the tests yourself, tick off the definition of done, check that live data and the main checkout are untouched.
 7. **Return** what falls short to the same `--session`: file:line, why, direction, this round's done. Claude does not fix it for the model; it takes over only if the user asks or several returns fail — and says why.
-8. **Record** every reviewed run (formal and shadow) with `oc-track.mjs add`, close its Rex tab (`rex window close`), then **wrap up**: rounds, problems and fixes, returns and why, model, `oc-rank` reasoning, total `cost`. Ask before merging, pushing or deploying.
+8. **Record** every reviewed run (formal and shadow) with `oc-track.mjs add`, close tab `rex.window`, then **wrap up**: rounds, problems and fixes, returns and why, model, `oc-rank` reasoning, total `cost`. Ask before merging, pushing or deploying.
 
 ## Allocation rules (implemented in `oc-rank.mjs`)
 

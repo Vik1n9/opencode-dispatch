@@ -6,8 +6,10 @@
 //   node oc-watch.mjs <log.jsonl> [--poll <ms>]
 //
 // Reads two files oc-run writes:
-//   <log>               raw opencode JSONL (followed from the start, like tail -f)
-//   <log>.status.json   { state: running|done, pid, title, model, agent, dir, base, segment, handoffs,
+//   <log>               raw opencode JSONL, followed like tail -f from the start (or from the last 8 MB when
+//                       more is waiting, with a note); read in bounded chunks, split into lines as bytes so a
+//                       character cut between two reads stays whole
+//   <log>.status.json   { state: running|done, pid, title, model, agent, dir, base, dirty, segment, handoffs,
 //                         summary }  — model changes on a handoff; summary is the final oc-run JSON
 // Prints model text, tool calls, step tokens / cost and errors as they arrive. `opencode run --format json`
 // reports a tool only once it has finished, so while the log is quiet (>= 5 s) the viewer asks the opencode
@@ -15,13 +17,14 @@
 // in a footer line: `⋯ <elapsed> <tool> <input>`, `⋯ <elapsed> thinking: <reasoning>`, or `⋯ <idle> waiting`
 // when the service cannot tell. On a terminal the footer is cut to the width and redrawn in place; otherwise
 // each change (ignoring the timer) is one line.
-// When the run is done it
-// prints the outcome and what changed in the folder since the run started (commits since `base`,
-// `git status --short`, `git diff --stat base`). Exit codes: 0 run finished ok, 1 run failed or oc-run
-// exited without a summary, 2 bad usage.
+// The view ends when the status says done, when the oc-run pid is gone, or — without a status file (a log
+// from before oc-watch, or copied elsewhere) — after the log has not grown for 10 s. It then prints the
+// outcome and the folder's state: commits since `base`, `git status --short` and `git diff --stat base`
+// (both show the folder now, so they include changes made before the run; `dirty` flags that case).
+// Exit codes: 0 run finished ok, 1 run failed or no summary, 2 bad usage.
 
 import { execFile, spawnSync } from 'node:child_process';
-import { closeSync, existsSync, openSync, readFileSync, readSync, statSync } from 'node:fs';
+import { closeSync, openSync, readFileSync, readSync, statSync } from 'node:fs';
 import { exitIfVersion } from './lib.mjs';
 
 exitIfVersion();
@@ -98,7 +101,7 @@ function setFooter(text) {
 
 let steps = 0;
 let cost = 0;
-const tokens = { input: 0, output: 0 };
+let tokens = { input: 0, output: 0 };
 
 let sessionID = null;
 let lastEvent = Date.now();
@@ -126,26 +129,56 @@ function render(ev) {
   }
 }
 
-// Follows the log from byte 0; a partial last line waits for the next read.
+// Follows the log as bytes; `pending` holds the bytes after the last newline until the line completes.
+const CHUNK = 1024 * 1024;
+const BACKLOG = 8 * 1024 * 1024;
 let offset = 0;
-let rest = '';
+let pending = Buffer.alloc(0);
+let skipPartial = false;
+let lastGrowth = Date.now();
+function line(bytes) {
+  const text = bytes.toString('utf8');
+  if (!text.trim()) return;
+  let ev;
+  try { ev = JSON.parse(text); } catch { return; }
+  render(ev);
+}
 function drain() {
-  let size;
-  try { size = statSync(log).size; } catch { return; }
-  if (size < offset) { offset = 0; rest = ''; }
-  if (size === offset) return;
-  const buf = Buffer.alloc(size - offset);
-  const fd = openSync(log, 'r');
-  try { readSync(fd, buf, 0, buf.length, offset); } finally { closeSync(fd); }
-  offset = size;
-  rest += buf.toString('utf8');
-  const lines = rest.split('\n');
-  rest = lines.pop();
-  for (const line of lines) {
-    if (!line.trim()) continue;
-    let ev;
-    try { ev = JSON.parse(line); } catch { continue; }
-    render(ev);
+  let fd;
+  try {
+    const size = statSync(log).size;
+    if (size < offset) {
+      // Truncated or replaced: start over, counters included.
+      offset = 0; pending = Buffer.alloc(0); steps = 0; cost = 0; tokens = { input: 0, output: 0 };
+      print(yellow('── log restarted'));
+    }
+    if (size === offset) return;
+    lastGrowth = Date.now();
+    if (size - offset > BACKLOG) {
+      print(dim(`… skipped ${Math.round((size - BACKLOG - offset) / 1048576)} MB of earlier log`));
+      offset = size - BACKLOG;
+      pending = Buffer.alloc(0);
+      skipPartial = true;
+    }
+    fd = openSync(log, 'r');
+    while (offset < size) {
+      const buf = Buffer.alloc(Math.min(CHUNK, size - offset));
+      const n = readSync(fd, buf, 0, buf.length, offset);
+      if (n <= 0) break;
+      offset += n;
+      let data = Buffer.concat([pending, buf.subarray(0, n)]);
+      let nl;
+      while ((nl = data.indexOf(0x0a)) >= 0) {
+        if (skipPartial) skipPartial = false;
+        else line(data.subarray(0, nl));
+        data = data.subarray(nl + 1);
+      }
+      pending = Buffer.from(data);
+    }
+  } catch {
+    // Deleted or unreadable for now: try again on the next poll.
+  } finally {
+    if (fd !== undefined) closeSync(fd);
   }
 }
 
@@ -165,7 +198,7 @@ function liveState(context, now = Date.now()) {
   return `⋯ ${elapsed(now - since)} thinking${thought ? `: ${oneLine(thought.text, 200)}` : ''}`;
 }
 
-// OC_WATCH_IDLE_MS (tests only) shortens the 5 s idle threshold and ask interval.
+// OC_WATCH_IDLE_MS (tests only) shortens the 5 s idle threshold and ask interval (and the 10 s no-status end).
 const IDLE_MS = Number(process.env.OC_WATCH_IDLE_MS) || 5000;
 let asking = false;
 let lastAsk = 0;
@@ -205,7 +238,8 @@ function outcome(status) {
   const s = status?.summary;
   console.log('');
   if (!s) {
-    console.log(red(`oc-run (pid ${status?.pid ?? '?'}) exited without a summary`));
+    console.log(red(status ? `oc-run (pid ${status.pid ?? '?'}) exited without a summary`
+      : 'no status file and the log stopped growing; the output above may be complete'));
     return 1;
   }
   const head = s.ok ? green('done') : red(s.stalled ? 'stalled' : s.limited || s.rateLimited ? 'limited' : 'failed');
@@ -215,6 +249,7 @@ function outcome(status) {
   const dir = status.dir;
   if (dir && git(dir, ['rev-parse', '--is-inside-work-tree']) === 'true') {
     if (status.base) section('commits', git(dir, ['log', '--oneline', `${status.base}..HEAD`]));
+    if (status.dirty) console.log(dim('the folder had uncommitted changes before the run; they show below too'));
     section('git status', git(dir, ['status', '--short']));
     section('diff --stat', git(dir, ['diff', '--stat', ...(status.base ? [status.base] : [])]));
   }
@@ -228,7 +263,6 @@ console.log(dim(`log ${log}`));
 console.log('');
 
 let model = first?.model;
-let missingSince = null;
 let done = false;
 const timer = setInterval(() => {
   drain();
@@ -240,16 +274,14 @@ const timer = setInterval(() => {
   if (status?.state === 'running') updateFooter(status);
   if (status?.state === 'done') return finish(status);
   if (status && !alive(status.pid)) return finish(status);
-  if (!status && !existsSync(log)) {
-    missingSince ??= Date.now();
-    if (Date.now() - missingSince > 10000) return finish(null);
-  }
+  if (!status && Date.now() - lastGrowth > 2 * IDLE_MS) return finish(null);
 }, poll);
 
 function finish(status) {
   clearInterval(timer);
   done = true;
   drain();
+  if (!skipPartial) line(pending);
   setFooter('');
   process.exitCode = outcome(status);
 }
