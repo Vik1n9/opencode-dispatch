@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { makeSandbox, runScript, writeShim, SHIM_OK, writeEvents, writeJson } from './helpers.mjs';
+import {
+  makeSandbox, runScript, spawnScript, waitFor, writeShim, SHIM_OK, writeEvents, writeJson,
+} from './helpers.mjs';
 
 const EVENTS = [
   { type: 'step_start', sessionID: 'ses_w' },
@@ -80,6 +82,65 @@ test('oc-watch: lists commits and changes since the run started', () => {
   assert.match(r.stdout, /commits\n\w+ feat: add b/);
   assert.match(r.stdout, /git status\n M a\.txt/);
   assert.match(r.stdout, /diff --stat\n.*a\.txt/);
+});
+
+// A fake `opencode` whose `api` call prints the session context named by OC_SHIM_CONTEXT (exit 1 if unset).
+function writeApiShim(sb) {
+  const path = join(sb.bin, 'opencode');
+  writeFileSync(path, `#!/bin/sh
+if [ "$1" = "api" ]; then
+  printf '%s\\n' "$@" > "${join(sb.dir, 'api-argv.txt')}"
+  [ -n "$OC_SHIM_CONTEXT" ] || exit 1
+  cat "$OC_SHIM_CONTEXT"; exit 0
+fi
+exit 0
+`);
+  chmodSync(path, 0o755);
+}
+
+async function watchLive(sb, context) {
+  writeApiShim(sb);
+  const log = writeEvents(sb, EVENTS.slice(0, 2));
+  const statusFile = `${log}.status.json`;
+  writeJson(statusFile, { state: 'running', pid: process.pid, model: 'opencode/m', dir: sb.dir });
+  const env = { NO_COLOR: '1', OC_WATCH_IDLE_MS: '100' };
+  if (context) {
+    env.OC_SHIM_CONTEXT = join(sb.dir, 'context.json');
+    writeJson(env.OC_SHIM_CONTEXT, context);
+  }
+  const { child, done } = spawnScript(sb, 'oc-watch.mjs', [log, '--poll', '20'], { env });
+  let out = '';
+  child.stdout.on('data', (d) => (out += d));
+  await waitFor(() => /⋯ \S+ (?!starting)/.test(out), 8000);
+  writeJson(statusFile, { state: 'done', pid: process.pid, model: 'opencode/m', dir: sb.dir,
+    summary: { ok: true, model: 'opencode/m', seconds: 1, steps: 0, cost: 0, handoffs: [], errors: [] } });
+  const r = await done;
+  return { r, argv: readFileSync(join(sb.dir, 'api-argv.txt'), 'utf8').trim().split('\n') };
+}
+
+test('oc-watch: a quiet log shows the tool the opencode service reports as running', async () => {
+  const now = Date.now();
+  const { r, argv } = await watchLive(makeSandbox(), { data: [
+    { type: 'user' },
+    { type: 'assistant', time: { created: now - 90000 }, content: [
+      { type: 'reasoning', text: 'run the suite' },
+      { type: 'tool', name: 'shell', state: { status: 'running', input: { command: 'node --test statusline/test/' } },
+        time: { created: now - 75000, ran: now - 75000 } },
+    ] },
+  ] });
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(argv, ['api', 'GET', '/api/session/ses_w/context']);
+  assert.match(r.stdout, /⋯ 1m1\ds shell node --test statusline\/test\//);
+});
+
+test('oc-watch: reasoning in progress shows as thinking; no service shows waiting', async () => {
+  const { r } = await watchLive(makeSandbox(), { data: [
+    { type: 'assistant', time: { created: Date.now() }, content: [{ type: 'reasoning', text: 'maybe the tests\nneed a pty' }] },
+  ] });
+  assert.match(r.stdout, /⋯ \d+s thinking: maybe the tests need a pty/);
+  const { r: r2 } = await watchLive(makeSandbox(), null);
+  assert.match(r2.stdout, /⋯ \d+s waiting/);
+  assert.match(r2.stdout, /── done/);
 });
 
 test('oc-run: inside Rex opens a background tab running oc-watch on the log', () => {

@@ -9,12 +9,18 @@
 //   <log>               raw opencode JSONL (followed from the start, like tail -f)
 //   <log>.status.json   { state: running|done, pid, title, model, agent, dir, base, segment, handoffs,
 //                         summary }  — model changes on a handoff; summary is the final oc-run JSON
-// Prints model text, tool calls, step tokens / cost and errors as they arrive. When the run is done it
+// Prints model text, tool calls, step tokens / cost and errors as they arrive. `opencode run --format json`
+// reports a tool only once it has finished, so while the log is quiet (>= 5 s) the viewer asks the opencode
+// service (`opencode api GET /api/session/<id>/context`, at most every 5 s) what is in progress and shows it
+// in a footer line: `⋯ <elapsed> <tool> <input>`, `⋯ <elapsed> thinking: <reasoning>`, or `⋯ <idle> waiting`
+// when the service cannot tell. On a terminal the footer is cut to the width and redrawn in place; otherwise
+// each change (ignoring the timer) is one line.
+// When the run is done it
 // prints the outcome and what changed in the folder since the run started (commits since `base`,
 // `git status --short`, `git diff --stat base`). Exit codes: 0 run finished ok, 1 run failed or oc-run
 // exited without a summary, 2 bad usage.
 
-import { spawnSync } from 'node:child_process';
+import { execFile, spawnSync } from 'node:child_process';
 import { closeSync, existsSync, openSync, readFileSync, readSync, statSync } from 'node:fs';
 import { exitIfVersion } from './lib.mjs';
 
@@ -58,31 +64,65 @@ function alive(pid) {
 
 const clock = (ms) => new Date(ms ?? Date.now()).toTimeString().slice(0, 8);
 const oneLine = (s, n = 160) => String(s ?? '').replace(/\s+/g, ' ').trim().slice(0, n);
+const brief = (input = {}) =>
+  input.command ?? input.filePath ?? input.path ?? input.pattern ?? input.url ?? input.description ?? '';
+const elapsed = (ms) => {
+  const s = Math.max(0, Math.round(ms / 1000));
+  return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m${String(s % 60).padStart(2, '0')}s`;
+};
+
+// Footer: one status line below the event stream. print() clears it first so events never mix with it.
+let footer = '';
+function print(line) {
+  if (footer && process.stdout.isTTY) process.stdout.write('\r\x1b[K');
+  console.log(line);
+  if (footer && process.stdout.isTTY) process.stdout.write(footer);
+}
+let shownFooter = '';
+function setFooter(text) {
+  if (process.stdout.isTTY) {
+    // A footer wider than the terminal would wrap, and \r\x1b[K clears only its last row.
+    const width = Math.max(10, (process.stdout.columns || 80) - 1);
+    const next = text ? dim(text.slice(0, width)) : '';
+    if (next === footer) return;
+    footer = next;
+    process.stdout.write(`\r\x1b[K${footer}`);
+  } else if (!text) {
+    shownFooter = '';
+  } else if (text.replace(/^⋯ \S+/, '⋯') !== shownFooter) {
+    // Without a terminal, print a footer only when it changes beyond its timer.
+    shownFooter = text.replace(/^⋯ \S+/, '⋯');
+    console.log(text);
+  }
+}
 
 let steps = 0;
 let cost = 0;
 const tokens = { input: 0, output: 0 };
 
+let sessionID = null;
+let lastEvent = Date.now();
 function render(ev) {
+  sessionID = ev.sessionID ?? sessionID;
+  lastEvent = Date.now();
   const p = ev.part ?? {};
   const t = dim(clock(ev.timestamp));
   if (ev.type === 'text' && p.text) {
-    console.log(`${t} ${p.text.trim()}`);
+    print(`${t} ${p.text.trim()}`);
   } else if (ev.type === 'tool_use') {
     const input = p.state?.input ?? {};
-    const brief = input.command ?? input.filePath ?? input.path ?? input.pattern ?? input.url ?? input.description ?? '';
     const status = p.state?.status ?? '?';
     const mark = status === 'error' ? red('✗') : status === 'completed' ? green('▸') : yellow('▸');
-    console.log(`${t} ${mark} ${cyan(p.tool ?? '?')} ${oneLine(brief)}`);
-    if (status === 'error') console.log(`         ${red(oneLine(p.state?.error, 300))}`);
+    print(`${t} ${mark} ${cyan(p.tool ?? '?')} ${oneLine(brief(input))}`);
+    if (status === 'error') print(`         ${red(oneLine(p.state?.error, 300))}`);
   } else if (ev.type === 'step_finish') {
     steps++;
     cost += p.cost ?? 0;
     tokens.input += p.tokens?.input ?? 0;
     tokens.output += p.tokens?.output ?? 0;
-    console.log(dim(`${clock(ev.timestamp)} · step ${steps}  in ${tokens.input} out ${tokens.output}  $${cost.toFixed(4)}`));
+    print(dim(`${clock(ev.timestamp)} · step ${steps}  in ${tokens.input} out ${tokens.output}  $${cost.toFixed(4)}`));
   } else if (ev.type === 'error') {
-    console.log(`${t} ${red('error')} ${oneLine(JSON.stringify(ev.error ?? ev), 300)}`);
+    print(`${t} ${red('error')} ${oneLine(JSON.stringify(ev.error ?? ev), 300)}`);
   }
 }
 
@@ -109,6 +149,45 @@ function drain() {
   }
 }
 
+// What the newest assistant message is doing now, from the opencode service's session context.
+function liveState(context, now = Date.now()) {
+  const entries = Array.isArray(context?.data) ? context.data : [];
+  const last = entries.findLast((e) => e?.type === 'assistant');
+  if (!last || last.time?.completed) return null;
+  const parts = Array.isArray(last.content) ? last.content : [];
+  const tool = parts.findLast((c) => c?.type === 'tool' && ['running', 'pending'].includes(c.state?.status));
+  if (tool) {
+    const since = tool.time?.ran ?? tool.time?.created ?? now;
+    return `⋯ ${elapsed(now - since)} ${tool.name ?? tool.tool ?? 'tool'} ${oneLine(brief(tool.state?.input), 200)}`;
+  }
+  const thought = parts.findLast((c) => c?.type === 'reasoning' && c.text);
+  const since = last.time?.created ?? now;
+  return `⋯ ${elapsed(now - since)} thinking${thought ? `: ${oneLine(thought.text, 200)}` : ''}`;
+}
+
+// OC_WATCH_IDLE_MS (tests only) shortens the 5 s idle threshold and ask interval.
+const IDLE_MS = Number(process.env.OC_WATCH_IDLE_MS) || 5000;
+let asking = false;
+let lastAsk = 0;
+function updateFooter(status) {
+  const idle = Date.now() - lastEvent;
+  if (idle < IDLE_MS) return setFooter('');
+  if (!sessionID || asking || Date.now() - lastAsk < IDLE_MS) {
+    if (!sessionID) setFooter(`⋯ ${elapsed(idle)} starting`);
+    return;
+  }
+  asking = true;
+  lastAsk = Date.now();
+  execFile('opencode', ['api', 'GET', `/api/session/${sessionID}/context`],
+    { cwd: status?.dir, timeout: 10000, maxBuffer: 256 * 1024 * 1024 }, (err, stdout) => {
+      asking = false;
+      if (done) return;
+      let text = null;
+      if (!err) { try { text = liveState(JSON.parse(stdout)); } catch {} }
+      setFooter(text ?? `⋯ ${elapsed(Date.now() - lastEvent)} waiting`);
+    });
+}
+
 function git(dir, args) {
   const r = spawnSync('git', ['-C', dir, ...args], { encoding: 'utf8', timeout: 10000 });
   return r.status === 0 ? r.stdout.trimEnd() : null;
@@ -122,7 +201,7 @@ function section(title, text, max = 40) {
   if (lines.length > max) console.log(dim(`… ${lines.length - max} more lines`));
 }
 
-function footer(status) {
+function outcome(status) {
   const s = status?.summary;
   console.log('');
   if (!s) {
@@ -150,13 +229,15 @@ console.log('');
 
 let model = first?.model;
 let missingSince = null;
+let done = false;
 const timer = setInterval(() => {
   drain();
   const status = readStatus();
   if (status?.model && status.model !== model) {
     model = status.model;
-    console.log(yellow(`── now ${model}`));
+    print(yellow(`── now ${model}`));
   }
+  if (status?.state === 'running') updateFooter(status);
   if (status?.state === 'done') return finish(status);
   if (status && !alive(status.pid)) return finish(status);
   if (!status && !existsSync(log)) {
@@ -167,6 +248,8 @@ const timer = setInterval(() => {
 
 function finish(status) {
   clearInterval(timer);
+  done = true;
   drain();
-  process.exitCode = footer(status);
+  setFooter('');
+  process.exitCode = outcome(status);
 }
